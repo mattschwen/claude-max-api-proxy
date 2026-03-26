@@ -1,95 +1,129 @@
-/**
- * API Route Handlers
- *
- * Implements OpenAI-compatible endpoints for integration with OpenClaw/Clawdbot.
- *
- * CONCURRENCY MODEL: Queue-and-Serialize per conversation.
- * - Each conversation gets a FIFO queue
- * - Requests for the same conversation are processed sequentially
- * - Different conversations run fully in parallel
- * - No request is ever silently killed — every request gets a response
- */
 import { v4 as uuidv4 } from "uuid";
-import { ClaudeSubprocess } from "../subprocess/manager.js";
+import { ClaudeSubprocess, subprocessRegistry } from "../subprocess/manager.js";
 import { openaiToCli } from "../adapter/openai-to-cli.js";
-import { cliResultToOpenai, createDoneChunk, } from "../adapter/cli-to-openai.js";
+import { cliResultToOpenai, createDoneChunk } from "../adapter/cli-to-openai.js";
 import { sessionManager } from "../session/manager.js";
 import { conversationStore } from "../store/conversation.js";
 import { subprocessPool } from "../subprocess/pool.js";
-import { getModelTimeout, isValidModel, getModelList } from "../models.js";
-
-/**
- * Per-conversation request queues.
- * Maps conversationId -> { queue: Array<Function>, processing: boolean }
- *
- * Each queue entry is a function that returns a Promise (the request handler).
- * Only one request processes at a time per conversation.
- * Different conversations are fully independent.
- */
+import { getModelTimeout, getStallTimeout, isValidModel, getModelList } from "../models.js";
+import { log, logError } from "../logger.js";
 const conversationQueues = new Map();
-
 /**
  * Enqueue a request for a conversation and process sequentially.
- * Returns a promise that resolves when THIS request completes.
+ * Phase 3a: Wraps handler with an absolute queue timeout.
  */
-function enqueueRequest(conversationId, handler) {
+function enqueueRequest(conversationId, handler, hardTimeoutMs) {
     return new Promise((resolve, reject) => {
         let entry = conversationQueues.get(conversationId);
         if (!entry) {
             entry = { queue: [], processing: false };
             conversationQueues.set(conversationId, entry);
         }
-
-        entry.queue.push({ handler, resolve, reject });
-
+        const queueTimeoutMs = hardTimeoutMs + 60000; // hard timeout + 60s buffer
+        const item = {
+            handler: () => {
+                // Wrap handler in a race with the queue timeout
+                return new Promise((handlerResolve, handlerReject) => {
+                    const queueTimer = setTimeout(() => {
+                        log("queue.timeout", { conversationId, timeoutMs: queueTimeoutMs });
+                        handlerReject(new Error(`Queue timeout after ${queueTimeoutMs / 1000}s`));
+                    }, queueTimeoutMs);
+                    handler()
+                        .then(() => {
+                        clearTimeout(queueTimer);
+                        handlerResolve();
+                    })
+                        .catch((err) => {
+                        clearTimeout(queueTimer);
+                        handlerReject(err);
+                    });
+                });
+            },
+            resolve,
+            reject,
+            enqueuedAt: Date.now(),
+        };
+        entry.queue.push(item);
+        log("queue.enqueue", { conversationId, depth: entry.queue.length });
         if (!entry.processing) {
             processQueue(conversationId);
         }
     });
 }
-
 /**
  * Process the next item in a conversation's queue.
+ * Phase 3a: Uses finally to guarantee queue always advances.
  */
 async function processQueue(conversationId) {
     const entry = conversationQueues.get(conversationId);
     if (!entry || entry.queue.length === 0) {
         if (entry) {
             entry.processing = false;
-            // Clean up empty queues to prevent memory leaks
             if (entry.queue.length === 0) {
                 conversationQueues.delete(conversationId);
             }
         }
         return;
     }
-
     entry.processing = true;
-    const { handler, resolve, reject } = entry.queue.shift();
-
+    const item = entry.queue.shift();
     try {
-        const result = await handler();
-        resolve(result);
-    } catch (err) {
-        reject(err);
+        const result = await item.handler();
+        item.resolve(result);
     }
-
-    // Process next item in queue (if any)
-    processQueue(conversationId);
+    catch (err) {
+        item.reject(err);
+    }
+    finally {
+        // Phase 3a: always advance the queue, even if handler throws
+        processQueue(conversationId);
+    }
 }
-
+// ---------------------------------------------------------------------------
+// Cleanup set (Phase 2b)
+// ---------------------------------------------------------------------------
 /**
- * Handle POST /v1/chat/completions
- *
- * Main endpoint for chat requests, supports both streaming and non-streaming.
- * Requests for the same conversation are queued and processed sequentially.
+ * Safe cleanup collection. Each function runs at most once, wrapped in try/catch.
  */
+class CleanupSet {
+    fns = new Set();
+    ran = false;
+    add(fn) {
+        if (!this.ran) {
+            this.fns.add(fn);
+        }
+    }
+    runAll() {
+        if (this.ran)
+            return;
+        this.ran = true;
+        for (const fn of this.fns) {
+            try {
+                fn();
+            }
+            catch (e) {
+                console.error("[Cleanup] Error:", e);
+            }
+        }
+        this.fns.clear();
+    }
+}
+// ---------------------------------------------------------------------------
+// SSE constants
+// ---------------------------------------------------------------------------
+const SSE_KEEPALIVE_INTERVAL = 5000;
+const DISCONNECT_GRACE_MS = 60000;
+// ---------------------------------------------------------------------------
+// Stall detection stats (Phase 4b)
+// ---------------------------------------------------------------------------
+let stallDetections = 0;
+// ---------------------------------------------------------------------------
+// Main handler
+// ---------------------------------------------------------------------------
 export async function handleChatCompletions(req, res) {
     const requestId = uuidv4().replace(/-/g, "").slice(0, 24);
     const body = req.body;
     const stream = body.stream === true;
-
-    // Validate request
     if (!body.messages || !Array.isArray(body.messages) || body.messages.length === 0) {
         res.status(400).json({
             error: {
@@ -100,8 +134,6 @@ export async function handleChatCompletions(req, res) {
         });
         return;
     }
-
-    // Validate model
     if (body.model && !isValidModel(body.model)) {
         res.status(400).json({
             error: {
@@ -112,16 +144,13 @@ export async function handleChatCompletions(req, res) {
         });
         return;
     }
-
     const startTime = Date.now();
     const conversationId = body.user || requestId;
     const queueEntry = conversationQueues.get(conversationId);
     const queueDepth = queueEntry ? queueEntry.queue.length : 0;
-
-    // Reject if queue is too deep (prevent unbounded memory growth)
     const MAX_QUEUE_DEPTH = 5;
     if (queueDepth >= MAX_QUEUE_DEPTH) {
-        console.warn(`[Routes] Queue full for ${conversationId} (${queueDepth} queued), rejecting`);
+        log("queue.blocked", { conversationId, depth: queueDepth });
         res.status(429).json({
             error: {
                 message: `Too many queued requests for this conversation (${queueDepth}). Please wait for current requests to complete.`,
@@ -131,115 +160,73 @@ export async function handleChatCompletions(req, res) {
         });
         return;
     }
-
-    if (queueDepth > 0) {
-        console.log(`[Routes] Queuing request for conversation ${conversationId} (${queueDepth} ahead)`);
-    }
-
+    // Compute hard timeout for queue wrapper
+    const thinking = body.thinking;
+    const tempModel = body.model ? String(body.model) : "sonnet";
+    const baseTimeout = getModelTimeout(tempModel);
+    const hardTimeout = (thinking?.type === "enabled" && thinking.budget_tokens) ? baseTimeout * 3 : baseTimeout;
+    log("request.start", { requestId, conversationId, model: tempModel, stream, queueDepth });
     try {
         await enqueueRequest(conversationId, async () => {
             const { sessionId, isResume } = sessionManager.getOrCreate(conversationId, body.model);
-            console.log(`[Routes] Processing conversation ${conversationId}: session=${sessionId}, resume=${isResume}`);
-
-            // Store conversation and incoming messages
             conversationStore.ensureConversation(conversationId, body.model, sessionId);
-            const lastUserMsg = body.messages.filter(m => m.role === "user").pop();
+            const messages = body.messages;
+            const lastUserMsg = messages.filter(m => m.role === "user").pop();
             if (lastUserMsg) {
                 const content = typeof lastUserMsg.content === "string"
                     ? lastUserMsg.content
                     : JSON.stringify(lastUserMsg.content);
                 conversationStore.addMessage(conversationId, "user", content);
             }
-
-            // Convert to CLI input format — skip history replay on resume
             const cliInput = openaiToCli(body, isResume);
             cliInput.sessionId = sessionId;
             cliInput.isResume = isResume;
             cliInput._conversationId = conversationId;
             cliInput._startTime = startTime;
-
+            if (thinking?.type === "enabled" && thinking.budget_tokens) {
+                cliInput.thinkingBudget = thinking.budget_tokens;
+            }
             if (stream) {
                 await handleStreamingResponse(req, res, cliInput, requestId);
-            } else {
+            }
+            else {
                 await handleNonStreamingResponse(res, cliInput, requestId);
             }
-        });
-    } catch (error) {
+        }, hardTimeout);
+    }
+    catch (error) {
         const message = error instanceof Error ? error.message : "Unknown error";
-        console.error("[handleChatCompletions] Error:", message);
+        logError("request.error", error, { requestId, conversationId });
         if (!res.headersSent) {
             res.status(500).json({
-                error: {
-                    message,
-                    type: "server_error",
-                    code: null,
-                },
+                error: { message, type: "server_error", code: null },
             });
         }
     }
 }
-
 /**
- * SSE keepalive interval (ms).
- * Sends a comment line to prevent connection timeouts.
+ * Single function that wires up all event handlers on a subprocess and
+ * returns a promise that resolves when the subprocess completes.
+ * Eliminates the duplicated event handler wiring from the old retry logic.
  */
-const SSE_KEEPALIVE_INTERVAL = 5000; // 5 seconds — aggressive to prevent OpenClaw HTTP timeouts
-
-/**
- * Spawn a subprocess with retry logic.
- * On first failure, waits briefly and retries once.
- * Returns the subprocess (caller wires up event handlers before calling this).
- */
-async function spawnWithRetry(subprocess, prompt, options, maxRetries = 1) {
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-        try {
-            await subprocess.start(prompt, options);
-            return; // Success
-        } catch (err) {
-            if (attempt < maxRetries) {
-                const delay = 1000 * (attempt + 1); // 1s, 2s, etc.
-                console.warn(`[Routes] Subprocess start failed (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms: ${err.message}`);
-                await new Promise(r => setTimeout(r, delay));
-                // Create a fresh subprocess for retry
-                subprocess.kill();
-                // Re-initialize (the subprocess class handles this via kill + re-start)
-            } else {
-                throw err;
-            }
-        }
-    }
-}
-
-/**
- * Handle streaming response (SSE)
- *
- * Each request gets its own subprocess — no abort logic needed.
- * The queue ensures only one request runs per conversation at a time.
- */
-async function handleStreamingResponse(req, res, cliInput, requestId) {
-    // Set SSE headers
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
-    res.setHeader("Connection", "keep-alive");
-    res.setHeader("X-Request-Id", requestId);
-    res.setHeader("X-Accel-Buffering", "no"); // Disable nginx buffering if proxied
-    res.flushHeaders();
-    res.write(":ok\n\n");
-
-    const timeout = getModelTimeout(cliInput.model);
-
+function runStreamingSubprocess(opts) {
+    const { cliInput, requestId, res, onStall } = opts;
+    const baseTimeout = getModelTimeout(cliInput.model);
+    const hardTimeout = cliInput.thinkingBudget ? baseTimeout * 3 : baseTimeout;
+    const stallTimeout = cliInput.thinkingBudget
+        ? getStallTimeout(cliInput.model) * 3 // thinking blocks can take a long time before first text
+        : getStallTimeout(cliInput.model);
     return new Promise((resolve) => {
         const subprocess = new ClaudeSubprocess();
+        const cleanup = new CleanupSet();
         let isFirst = true;
         let lastModel = "claude-sonnet-4";
         let isComplete = false;
         let fullResponse = "";
         let clientDisconnected = false;
-        let isRetrying = false; // Guard: prevents first close handler from acting during retry
-        let spawnTime = 0;
+        let lastActivityAt = Date.now();
+        const spawnTime = Date.now();
         let firstByteTime = 0;
-
-        // Pre-built SSE chunk template parts (avoid JSON.stringify per token)
         const chunkId = `chatcmpl-${requestId}`;
         const buildChunk = (text, model, first) => {
             const escaped = JSON.stringify(text);
@@ -249,121 +236,142 @@ async function handleStreamingResponse(req, res, cliInput, requestId) {
             }
             return `data: {"id":"${chunkId}","object":"chat.completion.chunk","created":${ts},"model":"${model}","choices":[{"index":0,"delta":{"content":${escaped}},"finish_reason":null}]}\n\n`;
         };
-
-        // SSE keepalive: send comment every 5s to prevent connection timeouts
+        const finish = (success) => {
+            if (isComplete)
+                return;
+            isComplete = true;
+            cleanup.runAll();
+            resolve({ fullResponse, success });
+        };
+        // SSE keepalive
         const keepaliveId = setInterval(() => {
             if (!isComplete && !clientDisconnected && !res.writableEnded) {
                 res.write(":keepalive\n\n");
             }
         }, SSE_KEEPALIVE_INTERVAL);
-
-        // Timeout handler for this specific request
-        const timeoutId = setTimeout(() => {
+        cleanup.add(() => clearInterval(keepaliveId));
+        // Hard timeout (absolute wall clock)
+        const hardTimeoutId = setTimeout(() => {
             if (!isComplete) {
-                console.error(`[Streaming] Request ${requestId} timed out after ${timeout}ms`);
+                log("request.timeout", {
+                    requestId,
+                    conversationId: cliInput._conversationId,
+                    durationMs: Date.now() - (cliInput._startTime || Date.now()),
+                    reason: "hard_timeout",
+                    timeoutMs: hardTimeout,
+                });
                 subprocess.kill();
-                // Invalidate session on timeout to prevent stale resume
                 if (cliInput._conversationId) {
                     sessionManager.delete(cliInput._conversationId);
-                    console.warn(`[Streaming] Session invalidated for ${cliInput._conversationId} due to timeout`);
                 }
-                if (!res.writableEnded) {
+                if (!clientDisconnected && !res.writableEnded) {
                     res.write(`data: ${JSON.stringify({
-                        error: { message: `Request timed out after ${timeout / 1000}s`, type: "timeout_error", code: null },
+                        error: { message: `Request timed out after ${hardTimeout / 1000}s`, type: "timeout_error", code: null },
                     })}\n\n`);
                     res.write("data: [DONE]\n\n");
                     res.end();
                 }
-                cleanup();
-                resolve();
+                finish(false);
             }
-        }, timeout);
-
-        let cleanup = () => {
-            clearTimeout(timeoutId);
-            clearInterval(keepaliveId);
-        };
-
-        // Handle client disconnect — give subprocess a grace period to finish
-        // OpenClaw sometimes drops the HTTP connection when a new user message
-        // arrives during streaming. We give the subprocess a grace period to
-        // complete naturally, then kill it to prevent zombie processes that
-        // permanently block the conversation queue.
-        const DISCONNECT_GRACE_MS = 60000; // 60 seconds to finish after client disconnects
-        res.on("close", () => {
+        }, hardTimeout);
+        cleanup.add(() => clearTimeout(hardTimeoutId));
+        // Stall detection (Phase 1a): check periodically if lastActivityAt has gone stale
+        const stallCheckInterval = setInterval(() => {
+            if (isComplete)
+                return;
+            const stalledFor = Date.now() - lastActivityAt;
+            if (stalledFor > stallTimeout) {
+                stallDetections++;
+                log("subprocess.stall", {
+                    requestId,
+                    conversationId: cliInput._conversationId,
+                    pid: subprocess.getPid(),
+                    stalledMs: stalledFor,
+                    stallTimeoutMs: stallTimeout,
+                    model: cliInput.model,
+                });
+                subprocess.kill();
+                if (cliInput._conversationId) {
+                    sessionManager.delete(cliInput._conversationId);
+                }
+                if (!clientDisconnected && !res.writableEnded) {
+                    res.write(`data: ${JSON.stringify({
+                        error: { message: `Subprocess stalled (no activity for ${Math.round(stalledFor / 1000)}s)`, type: "timeout_error", code: "stall_detected" },
+                    })}\n\n`);
+                    res.write("data: [DONE]\n\n");
+                    res.end();
+                }
+                onStall();
+                finish(false);
+            }
+        }, Math.min(stallTimeout / 2, 10000));
+        cleanup.add(() => clearInterval(stallCheckInterval));
+        // Client disconnect with grace period
+        const onClose = () => {
             clientDisconnected = true;
-            if (isRetrying) return; // Retry handler owns disconnect cleanup
-            if (!isComplete) {
-                console.warn(`[Streaming] Client disconnected for ${requestId}, subprocess gets ${DISCONNECT_GRACE_MS / 1000}s grace period`);
-                // Set a grace period — if subprocess doesn't finish in time, kill it
-                const disconnectTimeout = setTimeout(() => {
-                    if (!isComplete) {
-                        console.warn(`[Streaming] Grace period expired for ${requestId}, killing subprocess`);
-                        subprocess.kill();
-                        // Store partial response if we have any
-                        if (fullResponse && cliInput._conversationId) {
-                            try {
-                                conversationStore.addMessage(cliInput._conversationId, "assistant", fullResponse + "\n\n[Response truncated — client disconnected]");
-                            } catch (e) { console.error("[Routes] Store error:", e); }
+            if (isComplete)
+                return;
+            const disconnectTimeout = setTimeout(() => {
+                if (!isComplete) {
+                    log("subprocess.kill", {
+                        requestId,
+                        pid: subprocess.getPid(),
+                        reason: "client_disconnect_grace_expired",
+                    });
+                    subprocess.kill();
+                    if (fullResponse && cliInput._conversationId) {
+                        try {
+                            conversationStore.addMessage(cliInput._conversationId, "assistant", fullResponse + "\n\n[Response truncated — client disconnected]");
                         }
-                        cleanup();
-                        resolve();
+                        catch (e) {
+                            console.error("[Routes] Store error:", e);
+                        }
                     }
-                }, DISCONNECT_GRACE_MS);
-                // If subprocess finishes within grace period, clear the timeout
-                const origCleanup = cleanup;
-                cleanup = () => {
-                    clearTimeout(disconnectTimeout);
-                    origCleanup();
-                };
-            } else {
-                cleanup();
-                resolve();
-            }
-        });
-
-        // Stream content deltas to the client
+                    finish(false);
+                }
+            }, DISCONNECT_GRACE_MS);
+            cleanup.add(() => clearTimeout(disconnectTimeout));
+        };
+        res.on("close", onClose);
+        cleanup.add(() => res.removeListener("close", onClose));
+        // Event handlers
         subprocess.on("content_delta", (event) => {
+            lastActivityAt = Date.now(); // Reset stall timer
             const text = event.event?.delta?.text || "";
-            fullResponse += text; // Always buffer, even after disconnect
-            if (clientDisconnected) return; // Skip writing to closed connection
+            fullResponse += text;
+            if (clientDisconnected)
+                return;
             if (text && !res.writableEnded) {
-                // TTFB logging on first token
                 if (isFirst && !firstByteTime) {
                     firstByteTime = Date.now();
                     const ttfb = firstByteTime - (cliInput._startTime || firstByteTime);
-                    const spawnDelta = spawnTime ? spawnTime - (cliInput._startTime || spawnTime) : 0;
-                    const tokenDelta = spawnTime ? firstByteTime - spawnTime : 0;
-                    console.log(`[Streaming] TTFB: ${ttfb}ms (spawn: ${spawnDelta}ms, first-token: ${tokenDelta}ms) [${requestId}]`);
+                    const spawnDelta = spawnTime - (cliInput._startTime || spawnTime);
+                    const tokenDelta = firstByteTime - spawnTime;
+                    log("request.start", {
+                        requestId,
+                        ttfbMs: ttfb,
+                        spawnMs: spawnDelta,
+                        firstTokenMs: tokenDelta,
+                    });
                 }
                 res.write(buildChunk(text, lastModel, isFirst));
                 isFirst = false;
             }
         });
-
-        // Capture model name from assistant message
         subprocess.on("assistant", (message) => {
+            lastActivityAt = Date.now();
             lastModel = message.message.model;
         });
-
-        subprocess.on("result", (_result) => {
-            isComplete = true;
-            cleanup();
-
-            // Extract usage from CLI result message
-            const usageData = _result?.usage ? {
-                prompt_tokens: _result.usage.input_tokens || 0,
-                completion_tokens: _result.usage.output_tokens || 0,
-                total_tokens: (_result.usage.input_tokens || 0) + (_result.usage.output_tokens || 0),
+        subprocess.on("result", (result) => {
+            lastActivityAt = Date.now();
+            const usageData = result?.usage ? {
+                prompt_tokens: result.usage.input_tokens || 0,
+                completion_tokens: result.usage.output_tokens || 0,
+                total_tokens: (result.usage.input_tokens || 0) + (result.usage.output_tokens || 0),
             } : null;
-
-            // Store response and record metric — even if client disconnected
             try {
                 if (fullResponse && cliInput._conversationId) {
                     conversationStore.addMessage(cliInput._conversationId, "assistant", fullResponse);
-                    if (clientDisconnected) {
-                        console.log(`[Streaming] Subprocess completed after client disconnect. Response stored (${fullResponse.length} chars) for ${cliInput._conversationId}`);
-                    }
                 }
                 conversationStore.recordMetric("request_complete", {
                     conversationId: cliInput._conversationId,
@@ -371,10 +379,15 @@ async function handleStreamingResponse(req, res, cliInput, requestId) {
                     success: true,
                     clientDisconnected,
                 });
-            } catch (e) { console.error("[Routes] Store error:", e); }
-
+            }
+            catch (e) {
+                console.error("[Routes] Store error:", e);
+            }
+            // Mark session success
+            if (cliInput._conversationId && cliInput.isResume) {
+                sessionManager.markSuccess(cliInput._conversationId);
+            }
             if (!clientDisconnected && !res.writableEnded) {
-                // Send final chunk with usage data (OpenAI convention)
                 const doneChunk = createDoneChunk(requestId, lastModel);
                 if (usageData) {
                     doneChunk.usage = usageData;
@@ -383,13 +396,21 @@ async function handleStreamingResponse(req, res, cliInput, requestId) {
                 res.write("data: [DONE]\n\n");
                 res.end();
             }
-            resolve();
+            log("request.complete", {
+                requestId,
+                conversationId: cliInput._conversationId,
+                model: lastModel,
+                durationMs: Date.now() - (cliInput._startTime || Date.now()),
+                responseLength: fullResponse.length,
+                clientDisconnected,
+            });
+            finish(true);
         });
-
         subprocess.on("error", (error) => {
-            isComplete = true;
-            cleanup();
-            console.error("[Streaming] Error:", error.message);
+            logError("request.error", error, {
+                requestId,
+                conversationId: cliInput._conversationId,
+            });
             try {
                 conversationStore.recordMetric("request_error", {
                     conversationId: cliInput._conversationId,
@@ -398,8 +419,10 @@ async function handleStreamingResponse(req, res, cliInput, requestId) {
                     error: error.message,
                     clientDisconnected,
                 });
-            } catch (e) { console.error("[Routes] Metric error:", e); }
-
+            }
+            catch (e) {
+                console.error("[Routes] Metric error:", e);
+            }
             if (!clientDisconnected && !res.writableEnded) {
                 res.write(`data: ${JSON.stringify({
                     error: { message: error.message, type: "server_error", code: null },
@@ -407,210 +430,136 @@ async function handleStreamingResponse(req, res, cliInput, requestId) {
                 res.write("data: [DONE]\n\n");
                 res.end();
             }
-            resolve();
+            finish(false);
         });
-
         subprocess.on("close", (code) => {
-            cleanup();
-            if (!clientDisconnected && !res.writableEnded) {
-                if (code !== 0 && !isComplete) {
-                    res.write(`data: ${JSON.stringify({
-                        error: { message: `Process exited with code ${code}`, type: "server_error", code: null },
-                    })}\n\n`);
+            if (!isComplete) {
+                if (!clientDisconnected && !res.writableEnded) {
+                    if (code !== 0) {
+                        res.write(`data: ${JSON.stringify({
+                            error: { message: `Process exited with code ${code}`, type: "server_error", code: null },
+                        })}\n\n`);
+                    }
+                    res.write("data: [DONE]\n\n");
+                    res.end();
                 }
-                res.write("data: [DONE]\n\n");
-                res.end();
+                finish(code === 0);
             }
-            resolve();
         });
-
-        // Record spawn time for TTFB logging
-        spawnTime = Date.now();
-
-        // Start subprocess with retry on failure
+        // Start subprocess
         const startOpts = {
             model: cliInput.model,
             sessionId: cliInput.sessionId,
             systemPrompt: cliInput.systemPrompt,
             isResume: cliInput.isResume,
-            timeout: timeout,
+            thinkingBudget: cliInput.thinkingBudget,
         };
-
-        subprocess.start(cliInput.prompt, startOpts).catch(async (err) => {
-            console.warn(`[Streaming] First attempt failed: ${err.message}, retrying...`);
-            isRetrying = true; // Signal first close handler to skip
-            // Create fresh subprocess for retry, re-attach handlers
-            subprocess.kill();
-            const retry = new ClaudeSubprocess();
-            isFirst = true;
-
-            retry.on("content_delta", (event) => {
-                if (clientDisconnected) return;
-                const text = event.event?.delta?.text || "";
-                fullResponse += text;
-                if (text && !res.writableEnded) {
-                    if (isFirst && !firstByteTime) {
-                        firstByteTime = Date.now();
-                        console.log(`[Streaming] TTFB (retry): ${firstByteTime - (cliInput._startTime || firstByteTime)}ms [${requestId}]`);
-                    }
-                    res.write(buildChunk(text, lastModel, isFirst));
-                    isFirst = false;
-                }
-            });
-            retry.on("assistant", (message) => { lastModel = message.message.model; });
-            retry.on("result", (_result) => {
-                isComplete = true;
-                cleanup();
-
-                // Extract usage from CLI result message
-                const usageData = _result?.usage ? {
-                    prompt_tokens: _result.usage.input_tokens || 0,
-                    completion_tokens: _result.usage.output_tokens || 0,
-                    total_tokens: (_result.usage.input_tokens || 0) + (_result.usage.output_tokens || 0),
-                } : null;
-
-                try {
-                    if (fullResponse && cliInput._conversationId) {
-                        conversationStore.addMessage(cliInput._conversationId, "assistant", fullResponse);
-                    }
-                    conversationStore.recordMetric("request_complete", {
-                        conversationId: cliInput._conversationId,
-                        durationMs: Date.now() - (cliInput._startTime || Date.now()),
-                        success: true,
-                    });
-                } catch (e) { console.error("[Routes] Store error:", e); }
-                if (!res.writableEnded) {
-                    const doneChunk = createDoneChunk(requestId, lastModel);
-                    if (usageData) {
-                        doneChunk.usage = usageData;
-                    }
-                    res.write(`data: ${JSON.stringify(doneChunk)}\n\n`);
-                    res.write("data: [DONE]\n\n");
-                    res.end();
-                }
-                resolve();
-            });
-            retry.on("error", (error) => {
-                isComplete = true;
-                cleanup();
-                console.error("[Streaming] Retry also failed:", error.message);
-                if (!res.writableEnded) {
-                    res.write(`data: ${JSON.stringify({ error: { message: error.message, type: "server_error", code: null } })}\n\n`);
-                    res.write("data: [DONE]\n\n");
-                    res.end();
-                }
-                resolve();
-            });
-            retry.on("close", (code) => {
-                cleanup();
-                if (!res.writableEnded) {
-                    if (code !== 0 && !isComplete) {
-                        res.write(`data: ${JSON.stringify({ error: { message: `Process exited with code ${code}`, type: "server_error", code: null } })}\n\n`);
-                    }
-                    res.write("data: [DONE]\n\n");
-                    res.end();
-                }
-                resolve();
-            });
-            res.on("close", () => {
-                clientDisconnected = true;
-                if (isComplete) { cleanup(); resolve(); }
-                else {
-                    // Grace period for retry subprocess
-                    const retryDisconnectTimeout = setTimeout(() => {
-                        if (!isComplete) {
-                            console.warn(`[Streaming] Retry grace period expired for ${requestId}, killing subprocess`);
-                            retry.kill();
-                            cleanup();
-                            resolve();
-                        }
-                    }, DISCONNECT_GRACE_MS);
-                    const origCleanup2 = cleanup;
-                    cleanup = () => { clearTimeout(retryDisconnectTimeout); origCleanup2(); };
-                }
-            });
-
-            // If resume failed, retry WITHOUT resume (fresh session)
-            const retryOpts = { ...startOpts };
-            if (retryOpts.isResume) {
-                console.warn(`[Streaming] Dropping --resume for retry (session may be corrupted)`);
-                retryOpts.isResume = false;
-                // Invalidate the session so future requests get a fresh one
-                sessionManager.delete(cliInput._conversationId);
+        subprocess.start(cliInput.prompt, startOpts).catch((err) => {
+            logError("request.error", err, { requestId, reason: "subprocess_start_failed" });
+            if (!clientDisconnected && !res.writableEnded) {
+                res.write(`data: ${JSON.stringify({
+                    error: { message: err.message, type: "server_error", code: null },
+                })}\n\n`);
+                res.write("data: [DONE]\n\n");
+                res.end();
             }
-
-            await new Promise(r => setTimeout(r, 1000)); // Brief backoff
-            retry.start(cliInput.prompt, retryOpts).catch((retryErr) => {
-                cleanup();
-                console.error("[Streaming] Retry start also failed:", retryErr);
-                if (!res.writableEnded) {
-                    res.write(`data: ${JSON.stringify({ error: { message: retryErr.message, type: "server_error", code: null } })}\n\n`);
-                    res.write("data: [DONE]\n\n");
-                    res.end();
-                }
-                resolve();
-            });
+            finish(false);
         });
     });
 }
-
-/**
- * Handle non-streaming response
- */
+// ---------------------------------------------------------------------------
+// Streaming handler
+// ---------------------------------------------------------------------------
+async function handleStreamingResponse(req, res, cliInput, requestId) {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Request-Id", requestId);
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
+    res.write(":ok\n\n");
+    // First attempt
+    const result = await runStreamingSubprocess({
+        cliInput,
+        requestId,
+        res,
+        onStall: () => {
+            if (cliInput._conversationId) {
+                sessionManager.markFailed(cliInput._conversationId);
+            }
+        },
+    });
+    if (result.success)
+        return;
+    // Retry once on failure (Phase 2a: clean retry without duplicated handlers)
+    if (!res.writableEnded) {
+        log("request.retry", { requestId, conversationId: cliInput._conversationId });
+        // If resume failed, retry without resume
+        const retryCli = { ...cliInput };
+        if (retryCli.isResume && cliInput._conversationId) {
+            sessionManager.markFailed(cliInput._conversationId);
+            retryCli.isResume = false;
+            // Get fresh session
+            const { sessionId } = sessionManager.getOrCreate(cliInput._conversationId, cliInput.model);
+            retryCli.sessionId = sessionId;
+        }
+        await new Promise(r => setTimeout(r, 1000)); // Brief backoff
+        await runStreamingSubprocess({
+            cliInput: retryCli,
+            requestId,
+            res,
+            onStall: () => {
+                if (cliInput._conversationId) {
+                    sessionManager.markFailed(cliInput._conversationId);
+                }
+            },
+        });
+    }
+}
+// ---------------------------------------------------------------------------
+// Non-streaming handler
+// ---------------------------------------------------------------------------
 async function handleNonStreamingResponse(res, cliInput, requestId) {
-    const timeout = getModelTimeout(cliInput.model);
-
+    const baseTimeout = getModelTimeout(cliInput.model);
+    const timeout = cliInput.thinkingBudget ? baseTimeout * 3 : baseTimeout;
     return new Promise((resolve) => {
         const subprocess = new ClaudeSubprocess();
+        const cleanup = new CleanupSet();
         let finalResult = null;
         let isComplete = false;
-
         const timeoutId = setTimeout(() => {
             if (!isComplete) {
-                console.error(`[NonStreaming] Request ${requestId} timed out after ${timeout}ms`);
+                log("request.timeout", { requestId, conversationId: cliInput._conversationId, timeoutMs: timeout });
                 subprocess.kill();
                 if (!res.headersSent) {
                     res.status(504).json({
-                        error: {
-                            message: `Request timed out after ${timeout / 1000}s`,
-                            type: "timeout_error",
-                            code: null,
-                        },
+                        error: { message: `Request timed out after ${timeout / 1000}s`, type: "timeout_error", code: null },
                     });
                 }
+                isComplete = true;
+                cleanup.runAll();
                 resolve();
             }
         }, timeout);
-
-        const cleanup = () => {
-            clearTimeout(timeoutId);
-        };
-
+        cleanup.add(() => clearTimeout(timeoutId));
         subprocess.on("result", (result) => {
             finalResult = result;
         });
-
         subprocess.on("error", (error) => {
             isComplete = true;
-            cleanup();
-            console.error("[NonStreaming] Error:", error.message);
+            cleanup.runAll();
+            logError("request.error", error, { requestId });
             if (!res.headersSent) {
                 res.status(500).json({
-                    error: {
-                        message: error.message,
-                        type: "server_error",
-                        code: null,
-                    },
+                    error: { message: error.message, type: "server_error", code: null },
                 });
             }
             resolve();
         });
-
         subprocess.on("close", (code) => {
             isComplete = true;
-            cleanup();
+            cleanup.runAll();
             if (finalResult) {
-                // Store and record
                 try {
                     if (finalResult.result && cliInput._conversationId) {
                         conversationStore.addMessage(cliInput._conversationId, "assistant", finalResult.result);
@@ -620,12 +569,18 @@ async function handleNonStreamingResponse(res, cliInput, requestId) {
                         durationMs: Date.now() - (cliInput._startTime || Date.now()),
                         success: true,
                     });
-                } catch (e) { console.error("[Routes] Store error:", e); }
-
+                }
+                catch (e) {
+                    console.error("[Routes] Store error:", e);
+                }
+                if (cliInput._conversationId && cliInput.isResume) {
+                    sessionManager.markSuccess(cliInput._conversationId);
+                }
                 if (!res.headersSent) {
                     res.json(cliResultToOpenai(finalResult, requestId));
                 }
-            } else if (!res.headersSent) {
+            }
+            else if (!res.headersSent) {
                 res.status(500).json({
                     error: {
                         message: `Claude CLI exited with code ${code} without response`,
@@ -636,43 +591,35 @@ async function handleNonStreamingResponse(res, cliInput, requestId) {
             }
             resolve();
         });
-
-        // Start subprocess
         subprocess.start(cliInput.prompt, {
             model: cliInput.model,
             sessionId: cliInput.sessionId,
             systemPrompt: cliInput.systemPrompt,
             isResume: cliInput.isResume,
-            timeout: timeout,
+            thinkingBudget: cliInput.thinkingBudget,
         }).catch((error) => {
-            cleanup();
+            cleanup.runAll();
             if (!res.headersSent) {
                 res.status(500).json({
-                    error: {
-                        message: error.message,
-                        type: "server_error",
-                        code: null,
-                    },
+                    error: { message: error.message, type: "server_error", code: null },
                 });
             }
             resolve();
         });
     });
 }
-
-/**
- * Handle GET /v1/models — derived from central model registry
- */
+// ---------------------------------------------------------------------------
+// Models endpoint
+// ---------------------------------------------------------------------------
 export function handleModels(_req, res) {
     res.json({
         object: "list",
         data: getModelList(),
     });
 }
-
-/**
- * Handle GET /health
- */
+// ---------------------------------------------------------------------------
+// Enhanced health endpoint (Phase 4b)
+// ---------------------------------------------------------------------------
 export function handleHealth(_req, res) {
     let metrics = null;
     let storeStats = null;
@@ -682,33 +629,46 @@ export function handleHealth(_req, res) {
         metrics = conversationStore.getHealthMetrics(60);
         storeStats = conversationStore.getStats();
         recentErrors = conversationStore.getRecentErrors(5);
-    } catch (e) { /* store not initialized yet */ }
+    }
+    catch { /* store not initialized yet */ }
     try {
         poolStatus = subprocessPool.getStatus();
-    } catch (e) { /* pool not ready */ }
-
-    // Include queue status in health
+    }
+    catch { /* pool not ready */ }
+    // Queue status
     const queueStatus = {};
     for (const [convId, entry] of conversationQueues) {
         if (entry.queue.length > 0 || entry.processing) {
+            const oldestItem = entry.queue[0];
             queueStatus[convId] = {
                 queued: entry.queue.length,
                 processing: entry.processing,
+                waitMs: oldestItem ? Date.now() - oldestItem.enqueuedAt : undefined,
             };
         }
     }
-
+    // Subprocess registry
+    const activePids = subprocessRegistry.getActivePids();
+    // Session failure stats
+    const failureStats = sessionManager.getFailureStats();
     res.json({
         status: "ok",
         provider: "claude-code-cli",
         timestamp: new Date().toISOString(),
         sessions: {
             active: sessionManager.size,
+            failureStats,
+        },
+        subprocesses: {
+            active: activePids.length,
+            pids: activePids,
         },
         pool: poolStatus,
         store: storeStats,
         metrics,
         recentErrors,
+        stallDetections,
         queues: Object.keys(queueStatus).length > 0 ? queueStatus : undefined,
     });
 }
+//# sourceMappingURL=routes.js.map

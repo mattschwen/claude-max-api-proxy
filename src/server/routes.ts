@@ -1,0 +1,772 @@
+/**
+ * API Route Handlers
+ *
+ * Implements OpenAI-compatible endpoints for integration with OpenClaw/Clawdbot.
+ *
+ * CONCURRENCY MODEL: Queue-and-Serialize per conversation.
+ * - Each conversation gets a FIFO queue
+ * - Requests for the same conversation are processed sequentially
+ * - Different conversations run fully in parallel
+ * - No request is ever silently killed — every request gets a response
+ *
+ * Reliability improvements:
+ * - Phase 1a: Activity-based stall detection (resets on each content_delta)
+ * - Phase 2a: Extracted runStreamingSubprocess (single event-handler wiring)
+ * - Phase 2b: Cleanup safety (Set-based, run-once, try/catch each)
+ * - Phase 3a: Per-request queue timeout (absolute, with finally for processQueue)
+ * - Phase 4a: Structured logging
+ * - Phase 4b: Enhanced health endpoint
+ */
+import type { Request, Response } from "express";
+import { v4 as uuidv4 } from "uuid";
+import { ClaudeSubprocess, subprocessRegistry } from "../subprocess/manager.js";
+import { openaiToCli } from "../adapter/openai-to-cli.js";
+import type { CliInput } from "../adapter/openai-to-cli.js";
+import { cliResultToOpenai, createDoneChunk } from "../adapter/cli-to-openai.js";
+import { sessionManager } from "../session/manager.js";
+import { conversationStore } from "../store/conversation.js";
+import { subprocessPool } from "../subprocess/pool.js";
+import { getModelTimeout, getStallTimeout, isValidModel, getModelList } from "../models.js";
+import { log, logError } from "../logger.js";
+import type { ClaudeCliResult, ClaudeCliStreamEvent } from "../types/claude-cli.js";
+
+// ---------------------------------------------------------------------------
+// Queue infrastructure
+// ---------------------------------------------------------------------------
+
+interface QueueItem {
+  handler: () => Promise<void>;
+  resolve: (value: void) => void;
+  reject: (reason: unknown) => void;
+  enqueuedAt: number;
+}
+
+interface QueueEntry {
+  queue: QueueItem[];
+  processing: boolean;
+}
+
+const conversationQueues = new Map<string, QueueEntry>();
+
+/**
+ * Enqueue a request for a conversation and process sequentially.
+ * Phase 3a: Wraps handler with an absolute queue timeout.
+ */
+function enqueueRequest(conversationId: string, handler: () => Promise<void>, hardTimeoutMs: number): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    let entry = conversationQueues.get(conversationId);
+    if (!entry) {
+      entry = { queue: [], processing: false };
+      conversationQueues.set(conversationId, entry);
+    }
+
+    const queueTimeoutMs = hardTimeoutMs + 60000; // hard timeout + 60s buffer
+
+    const item: QueueItem = {
+      handler: () => {
+        // Wrap handler in a race with the queue timeout
+        return new Promise<void>((handlerResolve, handlerReject) => {
+          const queueTimer = setTimeout(() => {
+            log("queue.timeout", { conversationId, timeoutMs: queueTimeoutMs });
+            handlerReject(new Error(`Queue timeout after ${queueTimeoutMs / 1000}s`));
+          }, queueTimeoutMs);
+
+          handler()
+            .then(() => {
+              clearTimeout(queueTimer);
+              handlerResolve();
+            })
+            .catch((err) => {
+              clearTimeout(queueTimer);
+              handlerReject(err);
+            });
+        });
+      },
+      resolve,
+      reject,
+      enqueuedAt: Date.now(),
+    };
+
+    entry.queue.push(item);
+    log("queue.enqueue", { conversationId, depth: entry.queue.length });
+
+    if (!entry.processing) {
+      processQueue(conversationId);
+    }
+  });
+}
+
+/**
+ * Process the next item in a conversation's queue.
+ * Phase 3a: Uses finally to guarantee queue always advances.
+ */
+async function processQueue(conversationId: string): Promise<void> {
+  const entry = conversationQueues.get(conversationId);
+  if (!entry || entry.queue.length === 0) {
+    if (entry) {
+      entry.processing = false;
+      if (entry.queue.length === 0) {
+        conversationQueues.delete(conversationId);
+      }
+    }
+    return;
+  }
+
+  entry.processing = true;
+  const item = entry.queue.shift()!;
+
+  try {
+    const result = await item.handler();
+    item.resolve(result);
+  } catch (err) {
+    item.reject(err);
+  } finally {
+    // Phase 3a: always advance the queue, even if handler throws
+    processQueue(conversationId);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Cleanup set (Phase 2b)
+// ---------------------------------------------------------------------------
+
+/**
+ * Safe cleanup collection. Each function runs at most once, wrapped in try/catch.
+ */
+class CleanupSet {
+  private fns = new Set<() => void>();
+  private ran = false;
+
+  add(fn: () => void): void {
+    if (!this.ran) {
+      this.fns.add(fn);
+    }
+  }
+
+  runAll(): void {
+    if (this.ran) return;
+    this.ran = true;
+    for (const fn of this.fns) {
+      try { fn(); } catch (e) { console.error("[Cleanup] Error:", e); }
+    }
+    this.fns.clear();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SSE constants
+// ---------------------------------------------------------------------------
+
+const SSE_KEEPALIVE_INTERVAL = 5000;
+const DISCONNECT_GRACE_MS = 60000;
+
+// ---------------------------------------------------------------------------
+// Stall detection stats (Phase 4b)
+// ---------------------------------------------------------------------------
+
+let stallDetections = 0;
+
+// ---------------------------------------------------------------------------
+// Main handler
+// ---------------------------------------------------------------------------
+
+export async function handleChatCompletions(req: Request, res: Response): Promise<void> {
+  const requestId = uuidv4().replace(/-/g, "").slice(0, 24);
+  const body = req.body as Record<string, unknown>;
+  const stream = body.stream === true;
+
+  if (!body.messages || !Array.isArray(body.messages) || body.messages.length === 0) {
+    res.status(400).json({
+      error: {
+        message: "messages is required and must be a non-empty array",
+        type: "invalid_request_error",
+        code: "invalid_messages",
+      },
+    });
+    return;
+  }
+
+  if (body.model && !isValidModel(body.model as string)) {
+    res.status(400).json({
+      error: {
+        message: `Model '${body.model}' is not supported. Use GET /v1/models for available models.`,
+        type: "invalid_request_error",
+        code: "model_not_found",
+      },
+    });
+    return;
+  }
+
+  const startTime = Date.now();
+  const conversationId = (body.user as string) || requestId;
+  const queueEntry = conversationQueues.get(conversationId);
+  const queueDepth = queueEntry ? queueEntry.queue.length : 0;
+
+  const MAX_QUEUE_DEPTH = 5;
+  if (queueDepth >= MAX_QUEUE_DEPTH) {
+    log("queue.blocked", { conversationId, depth: queueDepth });
+    res.status(429).json({
+      error: {
+        message: `Too many queued requests for this conversation (${queueDepth}). Please wait for current requests to complete.`,
+        type: "rate_limit_error",
+        code: "queue_full",
+      },
+    });
+    return;
+  }
+
+  // Compute hard timeout for queue wrapper
+  const thinking = body.thinking as { type?: string; budget_tokens?: number } | undefined;
+  const tempModel = body.model ? String(body.model) : "sonnet";
+  const baseTimeout = getModelTimeout(tempModel);
+  const hardTimeout = (thinking?.type === "enabled" && thinking.budget_tokens) ? baseTimeout * 3 : baseTimeout;
+
+  log("request.start", { requestId, conversationId, model: tempModel, stream, queueDepth });
+
+  try {
+    await enqueueRequest(conversationId, async () => {
+      const { sessionId, isResume } = sessionManager.getOrCreate(conversationId, body.model as string);
+
+      conversationStore.ensureConversation(conversationId, body.model as string, sessionId);
+      const messages = body.messages as Array<{ role: string; content: string }>;
+      const lastUserMsg = messages.filter(m => m.role === "user").pop();
+      if (lastUserMsg) {
+        const content = typeof lastUserMsg.content === "string"
+          ? lastUserMsg.content
+          : JSON.stringify(lastUserMsg.content);
+        conversationStore.addMessage(conversationId, "user", content);
+      }
+
+      const cliInput = openaiToCli(body as unknown as Parameters<typeof openaiToCli>[0], isResume);
+      cliInput.sessionId = sessionId;
+      cliInput.isResume = isResume;
+      cliInput._conversationId = conversationId;
+      cliInput._startTime = startTime;
+      if (thinking?.type === "enabled" && thinking.budget_tokens) {
+        cliInput.thinkingBudget = thinking.budget_tokens;
+      }
+
+      if (stream) {
+        await handleStreamingResponse(req, res, cliInput, requestId);
+      } else {
+        await handleNonStreamingResponse(res, cliInput, requestId);
+      }
+    }, hardTimeout);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    logError("request.error", error, { requestId, conversationId });
+    if (!res.headersSent) {
+      res.status(500).json({
+        error: { message, type: "server_error", code: null },
+      });
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// runStreamingSubprocess (Phase 2a)
+// ---------------------------------------------------------------------------
+
+interface StreamOpts {
+  cliInput: CliInput;
+  requestId: string;
+  res: Response;
+  onStall: () => void;
+}
+
+/**
+ * Single function that wires up all event handlers on a subprocess and
+ * returns a promise that resolves when the subprocess completes.
+ * Eliminates the duplicated event handler wiring from the old retry logic.
+ */
+function runStreamingSubprocess(opts: StreamOpts): Promise<{ fullResponse: string; success: boolean }> {
+  const { cliInput, requestId, res, onStall } = opts;
+
+  const baseTimeout = getModelTimeout(cliInput.model);
+  const hardTimeout = cliInput.thinkingBudget ? baseTimeout * 3 : baseTimeout;
+  const stallTimeout = cliInput.thinkingBudget
+    ? getStallTimeout(cliInput.model) * 3  // thinking blocks can take a long time before first text
+    : getStallTimeout(cliInput.model);
+
+  return new Promise<{ fullResponse: string; success: boolean }>((resolve) => {
+    const subprocess = new ClaudeSubprocess();
+    const cleanup = new CleanupSet();
+
+    let isFirst = true;
+    let lastModel = "claude-sonnet-4";
+    let isComplete = false;
+    let fullResponse = "";
+    let clientDisconnected = false;
+    let lastActivityAt = Date.now();
+    const spawnTime = Date.now();
+    let firstByteTime = 0;
+    const chunkId = `chatcmpl-${requestId}`;
+
+    const buildChunk = (text: string, model: string, first: boolean): string => {
+      const escaped = JSON.stringify(text);
+      const ts = Math.floor(Date.now() / 1000);
+      if (first) {
+        return `data: {"id":"${chunkId}","object":"chat.completion.chunk","created":${ts},"model":"${model}","choices":[{"index":0,"delta":{"role":"assistant","content":${escaped}},"finish_reason":null}]}\n\n`;
+      }
+      return `data: {"id":"${chunkId}","object":"chat.completion.chunk","created":${ts},"model":"${model}","choices":[{"index":0,"delta":{"content":${escaped}},"finish_reason":null}]}\n\n`;
+    };
+
+    const finish = (success: boolean): void => {
+      if (isComplete) return;
+      isComplete = true;
+      cleanup.runAll();
+      resolve({ fullResponse, success });
+    };
+
+    // SSE keepalive
+    const keepaliveId = setInterval(() => {
+      if (!isComplete && !clientDisconnected && !res.writableEnded) {
+        res.write(":keepalive\n\n");
+      }
+    }, SSE_KEEPALIVE_INTERVAL);
+    cleanup.add(() => clearInterval(keepaliveId));
+
+    // Hard timeout (absolute wall clock)
+    const hardTimeoutId = setTimeout(() => {
+      if (!isComplete) {
+        log("request.timeout", {
+          requestId,
+          conversationId: cliInput._conversationId,
+          durationMs: Date.now() - (cliInput._startTime || Date.now()),
+          reason: "hard_timeout",
+          timeoutMs: hardTimeout,
+        });
+        subprocess.kill();
+        if (cliInput._conversationId) {
+          sessionManager.delete(cliInput._conversationId);
+        }
+        if (!clientDisconnected && !res.writableEnded) {
+          res.write(`data: ${JSON.stringify({
+            error: { message: `Request timed out after ${hardTimeout / 1000}s`, type: "timeout_error", code: null },
+          })}\n\n`);
+          res.write("data: [DONE]\n\n");
+          res.end();
+        }
+        finish(false);
+      }
+    }, hardTimeout);
+    cleanup.add(() => clearTimeout(hardTimeoutId));
+
+    // Stall detection (Phase 1a): check periodically if lastActivityAt has gone stale
+    const stallCheckInterval = setInterval(() => {
+      if (isComplete) return;
+      const stalledFor = Date.now() - lastActivityAt;
+      if (stalledFor > stallTimeout) {
+        stallDetections++;
+        log("subprocess.stall", {
+          requestId,
+          conversationId: cliInput._conversationId,
+          pid: subprocess.getPid(),
+          stalledMs: stalledFor,
+          stallTimeoutMs: stallTimeout,
+          model: cliInput.model,
+        });
+        subprocess.kill();
+        if (cliInput._conversationId) {
+          sessionManager.delete(cliInput._conversationId);
+        }
+        if (!clientDisconnected && !res.writableEnded) {
+          res.write(`data: ${JSON.stringify({
+            error: { message: `Subprocess stalled (no activity for ${Math.round(stalledFor / 1000)}s)`, type: "timeout_error", code: "stall_detected" },
+          })}\n\n`);
+          res.write("data: [DONE]\n\n");
+          res.end();
+        }
+        onStall();
+        finish(false);
+      }
+    }, Math.min(stallTimeout / 2, 10000));
+    cleanup.add(() => clearInterval(stallCheckInterval));
+
+    // Client disconnect with grace period
+    const onClose = (): void => {
+      clientDisconnected = true;
+      if (isComplete) return;
+      const disconnectTimeout = setTimeout(() => {
+        if (!isComplete) {
+          log("subprocess.kill", {
+            requestId,
+            pid: subprocess.getPid(),
+            reason: "client_disconnect_grace_expired",
+          });
+          subprocess.kill();
+          if (fullResponse && cliInput._conversationId) {
+            try {
+              conversationStore.addMessage(cliInput._conversationId, "assistant", fullResponse + "\n\n[Response truncated — client disconnected]");
+            } catch (e) { console.error("[Routes] Store error:", e); }
+          }
+          finish(false);
+        }
+      }, DISCONNECT_GRACE_MS);
+      cleanup.add(() => clearTimeout(disconnectTimeout));
+    };
+    res.on("close", onClose);
+    cleanup.add(() => res.removeListener("close", onClose));
+
+    // Event handlers
+    subprocess.on("content_delta", (event: ClaudeCliStreamEvent) => {
+      lastActivityAt = Date.now(); // Reset stall timer
+      const text = event.event?.delta?.text || "";
+      fullResponse += text;
+      if (clientDisconnected) return;
+      if (text && !res.writableEnded) {
+        if (isFirst && !firstByteTime) {
+          firstByteTime = Date.now();
+          const ttfb = firstByteTime - (cliInput._startTime || firstByteTime);
+          const spawnDelta = spawnTime - (cliInput._startTime || spawnTime);
+          const tokenDelta = firstByteTime - spawnTime;
+          log("request.start", {
+            requestId,
+            ttfbMs: ttfb,
+            spawnMs: spawnDelta,
+            firstTokenMs: tokenDelta,
+          });
+        }
+        res.write(buildChunk(text, lastModel, isFirst));
+        isFirst = false;
+      }
+    });
+
+    subprocess.on("assistant", (message) => {
+      lastActivityAt = Date.now();
+      lastModel = message.message.model;
+    });
+
+    subprocess.on("result", (result: ClaudeCliResult) => {
+      lastActivityAt = Date.now();
+
+      const usageData = result?.usage ? {
+        prompt_tokens: result.usage.input_tokens || 0,
+        completion_tokens: result.usage.output_tokens || 0,
+        total_tokens: (result.usage.input_tokens || 0) + (result.usage.output_tokens || 0),
+      } : null;
+
+      try {
+        if (fullResponse && cliInput._conversationId) {
+          conversationStore.addMessage(cliInput._conversationId, "assistant", fullResponse);
+        }
+        conversationStore.recordMetric("request_complete", {
+          conversationId: cliInput._conversationId,
+          durationMs: Date.now() - (cliInput._startTime || Date.now()),
+          success: true,
+          clientDisconnected,
+        });
+      } catch (e) { console.error("[Routes] Store error:", e); }
+
+      // Mark session success
+      if (cliInput._conversationId && cliInput.isResume) {
+        sessionManager.markSuccess(cliInput._conversationId);
+      }
+
+      if (!clientDisconnected && !res.writableEnded) {
+        const doneChunk = createDoneChunk(requestId, lastModel);
+        if (usageData) {
+          doneChunk.usage = usageData;
+        }
+        res.write(`data: ${JSON.stringify(doneChunk)}\n\n`);
+        res.write("data: [DONE]\n\n");
+        res.end();
+      }
+
+      log("request.complete", {
+        requestId,
+        conversationId: cliInput._conversationId,
+        model: lastModel,
+        durationMs: Date.now() - (cliInput._startTime || Date.now()),
+        responseLength: fullResponse.length,
+        clientDisconnected,
+      });
+
+      finish(true);
+    });
+
+    subprocess.on("error", (error: Error) => {
+      logError("request.error", error, {
+        requestId,
+        conversationId: cliInput._conversationId,
+      });
+      try {
+        conversationStore.recordMetric("request_error", {
+          conversationId: cliInput._conversationId,
+          durationMs: Date.now() - (cliInput._startTime || Date.now()),
+          success: false,
+          error: error.message,
+          clientDisconnected,
+        });
+      } catch (e) { console.error("[Routes] Metric error:", e); }
+
+      if (!clientDisconnected && !res.writableEnded) {
+        res.write(`data: ${JSON.stringify({
+          error: { message: error.message, type: "server_error", code: null },
+        })}\n\n`);
+        res.write("data: [DONE]\n\n");
+        res.end();
+      }
+      finish(false);
+    });
+
+    subprocess.on("close", (code: number | null) => {
+      if (!isComplete) {
+        if (!clientDisconnected && !res.writableEnded) {
+          if (code !== 0) {
+            res.write(`data: ${JSON.stringify({
+              error: { message: `Process exited with code ${code}`, type: "server_error", code: null },
+            })}\n\n`);
+          }
+          res.write("data: [DONE]\n\n");
+          res.end();
+        }
+        finish(code === 0);
+      }
+    });
+
+    // Start subprocess
+    const startOpts = {
+      model: cliInput.model,
+      sessionId: cliInput.sessionId,
+      systemPrompt: cliInput.systemPrompt,
+      isResume: cliInput.isResume,
+      thinkingBudget: cliInput.thinkingBudget,
+    };
+
+    subprocess.start(cliInput.prompt, startOpts).catch((err: Error) => {
+      logError("request.error", err, { requestId, reason: "subprocess_start_failed" });
+      if (!clientDisconnected && !res.writableEnded) {
+        res.write(`data: ${JSON.stringify({
+          error: { message: err.message, type: "server_error", code: null },
+        })}\n\n`);
+        res.write("data: [DONE]\n\n");
+        res.end();
+      }
+      finish(false);
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Streaming handler
+// ---------------------------------------------------------------------------
+
+async function handleStreamingResponse(req: Request, res: Response, cliInput: CliInput, requestId: string): Promise<void> {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Request-Id", requestId);
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders();
+  res.write(":ok\n\n");
+
+  // First attempt
+  const result = await runStreamingSubprocess({
+    cliInput,
+    requestId,
+    res,
+    onStall: () => {
+      if (cliInput._conversationId) {
+        sessionManager.markFailed(cliInput._conversationId);
+      }
+    },
+  });
+
+  if (result.success) return;
+
+  // Retry once on failure (Phase 2a: clean retry without duplicated handlers)
+  if (!res.writableEnded) {
+    log("request.retry", { requestId, conversationId: cliInput._conversationId });
+
+    // If resume failed, retry without resume
+    const retryCli: CliInput = { ...cliInput };
+    if (retryCli.isResume && cliInput._conversationId) {
+      sessionManager.markFailed(cliInput._conversationId);
+      retryCli.isResume = false;
+      // Get fresh session
+      const { sessionId } = sessionManager.getOrCreate(cliInput._conversationId, cliInput.model);
+      retryCli.sessionId = sessionId;
+    }
+
+    await new Promise(r => setTimeout(r, 1000)); // Brief backoff
+
+    await runStreamingSubprocess({
+      cliInput: retryCli,
+      requestId,
+      res,
+      onStall: () => {
+        if (cliInput._conversationId) {
+          sessionManager.markFailed(cliInput._conversationId);
+        }
+      },
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Non-streaming handler
+// ---------------------------------------------------------------------------
+
+async function handleNonStreamingResponse(res: Response, cliInput: CliInput, requestId: string): Promise<void> {
+  const baseTimeout = getModelTimeout(cliInput.model);
+  const timeout = cliInput.thinkingBudget ? baseTimeout * 3 : baseTimeout;
+
+  return new Promise<void>((resolve) => {
+    const subprocess = new ClaudeSubprocess();
+    const cleanup = new CleanupSet();
+    let finalResult: ClaudeCliResult | null = null;
+    let isComplete = false;
+
+    const timeoutId = setTimeout(() => {
+      if (!isComplete) {
+        log("request.timeout", { requestId, conversationId: cliInput._conversationId, timeoutMs: timeout });
+        subprocess.kill();
+        if (!res.headersSent) {
+          res.status(504).json({
+            error: { message: `Request timed out after ${timeout / 1000}s`, type: "timeout_error", code: null },
+          });
+        }
+        isComplete = true;
+        cleanup.runAll();
+        resolve();
+      }
+    }, timeout);
+    cleanup.add(() => clearTimeout(timeoutId));
+
+    subprocess.on("result", (result: ClaudeCliResult) => {
+      finalResult = result;
+    });
+
+    subprocess.on("error", (error: Error) => {
+      isComplete = true;
+      cleanup.runAll();
+      logError("request.error", error, { requestId });
+      if (!res.headersSent) {
+        res.status(500).json({
+          error: { message: error.message, type: "server_error", code: null },
+        });
+      }
+      resolve();
+    });
+
+    subprocess.on("close", (code: number | null) => {
+      isComplete = true;
+      cleanup.runAll();
+      if (finalResult) {
+        try {
+          if (finalResult.result && cliInput._conversationId) {
+            conversationStore.addMessage(cliInput._conversationId, "assistant", finalResult.result);
+          }
+          conversationStore.recordMetric("request_complete", {
+            conversationId: cliInput._conversationId,
+            durationMs: Date.now() - (cliInput._startTime || Date.now()),
+            success: true,
+          });
+        } catch (e) { console.error("[Routes] Store error:", e); }
+
+        if (cliInput._conversationId && cliInput.isResume) {
+          sessionManager.markSuccess(cliInput._conversationId);
+        }
+
+        if (!res.headersSent) {
+          res.json(cliResultToOpenai(finalResult, requestId));
+        }
+      } else if (!res.headersSent) {
+        res.status(500).json({
+          error: {
+            message: `Claude CLI exited with code ${code} without response`,
+            type: "server_error",
+            code: null,
+          },
+        });
+      }
+      resolve();
+    });
+
+    subprocess.start(cliInput.prompt, {
+      model: cliInput.model,
+      sessionId: cliInput.sessionId,
+      systemPrompt: cliInput.systemPrompt,
+      isResume: cliInput.isResume,
+      thinkingBudget: cliInput.thinkingBudget,
+    }).catch((error: Error) => {
+      cleanup.runAll();
+      if (!res.headersSent) {
+        res.status(500).json({
+          error: { message: error.message, type: "server_error", code: null },
+        });
+      }
+      resolve();
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Models endpoint
+// ---------------------------------------------------------------------------
+
+export function handleModels(_req: Request, res: Response): void {
+  res.json({
+    object: "list",
+    data: getModelList(),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Enhanced health endpoint (Phase 4b)
+// ---------------------------------------------------------------------------
+
+export function handleHealth(_req: Request, res: Response): void {
+  let metrics: Array<Record<string, unknown>> | null = null;
+  let storeStats: { conversations: number; messages: number; metrics: number } | null = null;
+  let poolStatus: ReturnType<typeof subprocessPool.getStatus> | null = null;
+  let recentErrors: Array<Record<string, unknown>> = [];
+  try {
+    metrics = conversationStore.getHealthMetrics(60);
+    storeStats = conversationStore.getStats();
+    recentErrors = conversationStore.getRecentErrors(5);
+  } catch { /* store not initialized yet */ }
+  try {
+    poolStatus = subprocessPool.getStatus();
+  } catch { /* pool not ready */ }
+
+  // Queue status
+  const queueStatus: Record<string, { queued: number; processing: boolean; waitMs?: number }> = {};
+  for (const [convId, entry] of conversationQueues) {
+    if (entry.queue.length > 0 || entry.processing) {
+      const oldestItem = entry.queue[0];
+      queueStatus[convId] = {
+        queued: entry.queue.length,
+        processing: entry.processing,
+        waitMs: oldestItem ? Date.now() - oldestItem.enqueuedAt : undefined,
+      };
+    }
+  }
+
+  // Subprocess registry
+  const activePids = subprocessRegistry.getActivePids();
+
+  // Session failure stats
+  const failureStats = sessionManager.getFailureStats();
+
+  res.json({
+    status: "ok",
+    provider: "claude-code-cli",
+    timestamp: new Date().toISOString(),
+    sessions: {
+      active: sessionManager.size,
+      failureStats,
+    },
+    subprocesses: {
+      active: activePids.length,
+      pids: activePids,
+    },
+    pool: poolStatus,
+    store: storeStats,
+    metrics,
+    recentErrors,
+    stallDetections,
+    queues: Object.keys(queueStatus).length > 0 ? queueStatus : undefined,
+  });
+}

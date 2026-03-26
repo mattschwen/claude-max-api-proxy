@@ -55,7 +55,6 @@ export function createDoneChunk(requestId, model) {
  * Convert Claude CLI result to OpenAI non-streaming response
  */
 export function cliResultToOpenai(result, requestId) {
-    // Get model from modelUsage or default
     const modelName = result.modelUsage
         ? Object.keys(result.modelUsage)[0]
         : "claude-sonnet-4";
@@ -81,5 +80,4 @@ export function cliResultToOpenai(result, requestId) {
         },
     };
 }
-// normalizeModelName imported from ../models.js
 //# sourceMappingURL=cli-to-openai.js.map

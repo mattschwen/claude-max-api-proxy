@@ -4,16 +4,15 @@
  * Handles spawning, managing, and parsing output from Claude CLI subprocesses.
  * Uses spawn() instead of exec() to prevent shell injection vulnerabilities.
  *
- * Improvements over v1:
- * - Model-specific timeouts (opus: 5min, sonnet: 2min, haiku: 1min)
- * - Better error classification and propagation
- * - Cleaner process lifecycle management
+ * Phase 1b: Kill escalation (SIGTERM -> SIGKILL after 5s grace)
+ * Phase 1c: No duplicate timeout — caller (routes) owns all timeout behavior
+ * Phase 4a: Structured logging
  */
 import { spawn } from "child_process";
 import { EventEmitter } from "events";
 import { isAssistantMessage, isResultMessage, isContentDelta } from "../types/claude-cli.js";
-import { getModelTimeout } from "../models.js";
-
+import { log } from "../logger.js";
+const KILL_ESCALATION_MS = 5000;
 // Cache cleaned environment once at startup
 const CLEAN_ENV = (() => {
     const env = { ...process.env };
@@ -23,20 +22,49 @@ const CLEAN_ENV = (() => {
     delete env.CLAUDE_CODE_PARENT;
     return env;
 })();
-
+/**
+ * Global subprocess registry for server-wide cleanup.
+ * Tracks all active subprocesses so graceful shutdown can kill them all.
+ */
+class SubprocessRegistry {
+    active = new Map();
+    register(subprocess) {
+        const pid = subprocess.getPid();
+        if (pid !== null) {
+            this.active.set(pid, subprocess);
+        }
+    }
+    unregister(subprocess) {
+        const pid = subprocess.getPid();
+        if (pid !== null) {
+            this.active.delete(pid);
+        }
+    }
+    killAll() {
+        log("server.shutdown", { reason: `Killing ${this.active.size} active subprocesses` });
+        for (const [, sub] of this.active) {
+            sub.kill();
+        }
+    }
+    getActivePids() {
+        return Array.from(this.active.keys());
+    }
+    get size() {
+        return this.active.size;
+    }
+}
+export const subprocessRegistry = new SubprocessRegistry();
 export class ClaudeSubprocess extends EventEmitter {
     process = null;
     buffer = "";
-    timeoutId = null;
-    isKilled = false;
-
+    killed = false;
+    escalationTimer = null;
     /**
-     * Start the Claude CLI subprocess with the given prompt
+     * Start the Claude CLI subprocess with the given prompt.
+     * No timeout is set here — caller owns timeout behavior (Phase 1c).
      */
     async start(prompt, options) {
         const args = this.buildArgs(prompt, options);
-        const timeout = options.timeout || getModelTimeout(options.model);
-
         return new Promise((resolve, reject) => {
             try {
                 this.process = spawn("claude", args, {
@@ -44,69 +72,49 @@ export class ClaudeSubprocess extends EventEmitter {
                     env: CLEAN_ENV,
                     stdio: ["pipe", "pipe", "pipe"],
                 });
-
-                // Set model-aware timeout
-                this.timeoutId = setTimeout(() => {
-                    if (!this.isKilled) {
-                        this.isKilled = true;
-                        this.process?.kill("SIGTERM");
-                        this.emit("error", new Error(`Request timed out after ${timeout / 1000}s (model: ${options.model})`));
-                    }
-                }, timeout);
-
-                // Handle spawn errors
                 this.process.on("error", (err) => {
-                    this.clearTimeout();
-                    if (err.message.includes("ENOENT")) {
+                    if (err.code === "ENOENT") {
                         reject(new Error("Claude CLI not found. Install with: npm install -g @anthropic-ai/claude-code"));
-                    } else {
+                    }
+                    else {
                         reject(err);
                     }
                 });
-
-                // Close stdin since we pass prompt as argument
                 this.process.stdin?.end();
-
-                console.error(`[Subprocess] PID ${this.process.pid} spawned (model: ${options.model}, timeout: ${timeout / 1000}s, session: ${options.sessionId?.slice(0, 8) || 'new'})`);
-
-                // Parse JSON stream from stdout
+                const pid = this.process.pid;
+                log("subprocess.spawn", {
+                    pid,
+                    model: options.model,
+                    thinking: options.thinkingBudget ?? "off",
+                    sessionId: options.sessionId?.slice(0, 8),
+                    resume: options.isResume,
+                });
+                subprocessRegistry.register(this);
                 this.process.stdout?.on("data", (chunk) => {
-                    const data = chunk.toString();
-                    this.buffer += data;
+                    this.buffer += chunk.toString();
                     this.processBuffer();
                 });
-
-                // Capture stderr for debugging (less verbose than before)
                 this.process.stderr?.on("data", (chunk) => {
                     const errorText = chunk.toString().trim();
                     if (errorText && process.env.DEBUG) {
                         console.error("[Subprocess stderr]:", errorText.slice(0, 200));
                     }
                 });
-
-                // Handle process close
                 this.process.on("close", (code) => {
-                    console.error(`[Subprocess] PID ${this.process?.pid} closed (code: ${code})`);
-                    this.clearTimeout();
-                    // Process any remaining buffer
+                    log("subprocess.close", { pid: this.process?.pid, code });
+                    subprocessRegistry.unregister(this);
                     if (this.buffer.trim()) {
                         this.processBuffer();
                     }
                     this.emit("close", code);
                 });
-
-                // Resolve immediately since we're streaming
                 resolve();
-            } catch (err) {
-                this.clearTimeout();
+            }
+            catch (err) {
                 reject(err);
             }
         });
     }
-
-    /**
-     * Build CLI arguments array
-     */
     buildArgs(prompt, options) {
         const args = [
             "--print",
@@ -116,87 +124,81 @@ export class ClaudeSubprocess extends EventEmitter {
             "--model", options.model,
             "--dangerously-skip-permissions",
         ];
-
-        // Session persistence
         if (options.isResume && options.sessionId) {
             args.push("--resume", options.sessionId);
-        } else if (options.sessionId) {
+        }
+        else if (options.sessionId) {
             args.push("--session-id", options.sessionId);
         }
-
-        // System prompt
         if (options.systemPrompt) {
             args.push("--system-prompt", options.systemPrompt);
         }
-
-        // Fallback model for opus
         if (options.model === "opus") {
             args.push("--fallback-model", "sonnet");
         }
-
-        // Prompt must be last argument
+        if (options.thinkingBudget) {
+            args.push("--extended-thinking-budget", String(options.thinkingBudget));
+        }
         args.push(prompt);
         return args;
     }
-
-    /**
-     * Process the buffer and emit parsed messages
-     */
     processBuffer() {
         const lines = this.buffer.split("\n");
-        this.buffer = lines.pop() || ""; // Keep incomplete line
-
+        this.buffer = lines.pop() || "";
         for (const line of lines) {
             const trimmed = line.trim();
-            if (!trimmed) continue;
-
+            if (!trimmed)
+                continue;
             try {
                 const message = JSON.parse(trimmed);
                 this.emit("message", message);
-
                 if (isContentDelta(message)) {
                     this.emit("content_delta", message);
-                } else if (isAssistantMessage(message)) {
+                }
+                else if (isAssistantMessage(message)) {
                     this.emit("assistant", message);
-                } else if (isResultMessage(message)) {
+                }
+                else if (isResultMessage(message)) {
                     this.emit("result", message);
                 }
-            } catch {
-                // Non-JSON output, emit as raw
+            }
+            catch {
                 this.emit("raw", trimmed);
             }
         }
     }
-
     /**
-     * Clear the timeout timer
+     * Kill the subprocess with escalation: SIGTERM -> SIGKILL after 5s grace.
      */
-    clearTimeout() {
-        if (this.timeoutId) {
-            clearTimeout(this.timeoutId);
-            this.timeoutId = null;
-        }
+    kill() {
+        if (this.killed || !this.process)
+            return;
+        this.killed = true;
+        const pid = this.process.pid;
+        log("subprocess.kill", { pid, signal: "SIGTERM" });
+        this.process.kill("SIGTERM");
+        // Escalate to SIGKILL if process doesn't exit within grace period
+        this.escalationTimer = setTimeout(() => {
+            if (this.process && this.process.exitCode === null) {
+                log("subprocess.kill", { pid, signal: "SIGKILL", reason: "escalation after SIGTERM timeout" });
+                this.process.kill("SIGKILL");
+            }
+        }, KILL_ESCALATION_MS);
+        // Clear escalation timer if process exits normally
+        this.process.once("close", () => {
+            if (this.escalationTimer) {
+                clearTimeout(this.escalationTimer);
+                this.escalationTimer = null;
+            }
+        });
     }
-
-    /**
-     * Kill the subprocess
-     */
-    kill(signal = "SIGTERM") {
-        if (!this.isKilled && this.process) {
-            this.isKilled = true;
-            this.clearTimeout();
-            this.process.kill(signal);
-        }
-    }
-
-    /**
-     * Check if the process is still running
-     */
     isRunning() {
-        return this.process !== null && !this.isKilled && this.process.exitCode === null;
+        return this.process !== null && !this.killed && this.process.exitCode === null;
+    }
+    getPid() {
+        return this.process?.pid ?? null;
     }
 }
-
 /**
  * Verify that Claude CLI is installed and accessible
  */
@@ -216,7 +218,8 @@ export async function verifyClaude() {
         proc.on("close", (code) => {
             if (code === 0) {
                 resolve({ ok: true, version: output.trim() });
-            } else {
+            }
+            else {
                 resolve({
                     ok: false,
                     error: "Claude CLI returned non-zero exit code",
@@ -225,10 +228,10 @@ export async function verifyClaude() {
         });
     });
 }
-
 /**
  * Check if Claude CLI is authenticated
  */
 export async function verifyAuth() {
     return { ok: true };
 }
+//# sourceMappingURL=manager.js.map

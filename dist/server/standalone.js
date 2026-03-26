@@ -2,24 +2,29 @@
 /**
  * Standalone server for testing without Clawdbot
  *
+ * Phase 4c: Graceful shutdown — stop accepting → wait for in-flight →
+ *           kill all subprocesses → save sessions → exit
+ *
  * Usage:
  *   npm run start
  *   # or
  *   node dist/server/standalone.js [port]
  */
-import { startServer, stopServer } from "./index.js";
+import { startServer, stopServer, getServer } from "./index.js";
 import { verifyClaude, verifyAuth } from "../subprocess/manager.js";
+import { subprocessRegistry } from "../subprocess/manager.js";
+import { sessionManager } from "../session/manager.js";
+import { log } from "../logger.js";
 const DEFAULT_PORT = 3456;
+const SHUTDOWN_GRACE_MS = 30000;
 async function main() {
     console.log("Claude Code CLI Provider - Standalone Server");
     console.log("============================================\n");
-    // Parse port from command line
     const port = parseInt(process.argv[2] || String(DEFAULT_PORT), 10);
     if (isNaN(port) || port < 1 || port > 65535) {
         console.error(`Invalid port: ${process.argv[2]}`);
         process.exit(1);
     }
-    // Verify Claude CLI
     console.log("Checking Claude CLI...");
     const cliCheck = await verifyClaude();
     if (!cliCheck.ok) {
@@ -27,7 +32,6 @@ async function main() {
         process.exit(1);
     }
     console.log(`  Claude CLI: ${cliCheck.version || "OK"}`);
-    // Verify authentication
     console.log("Checking authentication...");
     const authCheck = await verifyAuth();
     if (!authCheck.ok) {
@@ -36,9 +40,9 @@ async function main() {
         process.exit(1);
     }
     console.log("  Authentication: OK\n");
-    // Start server
     try {
         await startServer({ port });
+        log("server.start", { port });
         console.log("\nServer ready. Test with:");
         console.log(`  curl -X POST http://localhost:${port}/v1/chat/completions \\`);
         console.log(`    -H "Content-Type: application/json" \\`);
@@ -49,14 +53,61 @@ async function main() {
         console.error("Failed to start server:", err);
         process.exit(1);
     }
-    // Handle graceful shutdown
-    const shutdown = async () => {
-        console.log("\nShutting down...");
-        await stopServer();
+    let shuttingDown = false;
+    const shutdown = async (signal) => {
+        if (shuttingDown)
+            return;
+        shuttingDown = true;
+        log("server.shutdown", { signal });
+        console.log(`\n[Shutdown] Received ${signal}, starting graceful shutdown...`);
+        // 1. Stop accepting new connections
+        const server = getServer();
+        if (server) {
+            server.close(() => {
+                console.log("[Shutdown] Server closed to new connections");
+            });
+        }
+        // 2. Wait for in-flight requests (grace period)
+        const activeCount = subprocessRegistry.size;
+        if (activeCount > 0) {
+            console.log(`[Shutdown] Waiting up to ${SHUTDOWN_GRACE_MS / 1000}s for ${activeCount} in-flight requests...`);
+            await new Promise((resolve) => {
+                const checkInterval = setInterval(() => {
+                    if (subprocessRegistry.size === 0) {
+                        clearInterval(checkInterval);
+                        console.log("[Shutdown] All in-flight requests completed");
+                        resolve();
+                    }
+                }, 500);
+                setTimeout(() => {
+                    clearInterval(checkInterval);
+                    if (subprocessRegistry.size > 0) {
+                        console.log(`[Shutdown] Grace period expired, ${subprocessRegistry.size} requests still active`);
+                    }
+                    resolve();
+                }, SHUTDOWN_GRACE_MS);
+            });
+        }
+        // 3. Kill remaining subprocesses
+        if (subprocessRegistry.size > 0) {
+            console.log(`[Shutdown] Killing ${subprocessRegistry.size} remaining subprocesses`);
+            subprocessRegistry.killAll();
+        }
+        // 4. Save sessions
+        if (sessionManager["dirty"]) {
+            console.log("[Shutdown] Saving sessions...");
+            sessionManager.saveSync();
+        }
+        // 5. Stop server and exit
+        try {
+            await stopServer();
+        }
+        catch { /* already closing */ }
+        console.log("[Shutdown] Goodbye");
         process.exit(0);
     };
-    process.on("SIGINT", shutdown);
-    process.on("SIGTERM", shutdown);
+    process.on("SIGINT", () => shutdown("SIGINT"));
+    process.on("SIGTERM", () => shutdown("SIGTERM"));
 }
 main().catch((err) => {
     console.error("Unexpected error:", err);

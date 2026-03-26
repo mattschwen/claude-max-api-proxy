@@ -4,11 +4,9 @@
 import { resolveModel } from "../models.js";
 /**
  * Extract Claude model alias from request model string.
- * Returns null for unrecognized models (caller decides fallback behavior).
  */
 export function extractModel(model) {
-    // Returns CLI alias or falls back to "sonnet" if model was not validated upstream
-    return resolveModel(model) ?? "sonnet";
+    return (resolveModel(model) ?? "sonnet");
 }
 /**
  * Flatten content to a string. Handles both string content and
@@ -21,11 +19,12 @@ function flattenContent(content) {
     if (Array.isArray(content)) {
         return content
             .map((part) => {
-                if (typeof part === "string") return part;
-                if (part && typeof part === "object" && part.text) return part.text;
-                if (part && typeof part === "object" && part.type === "text" && part.text) return part.text;
-                return "";
-            })
+            if (typeof part === "string")
+                return part;
+            if (part && typeof part === "object" && "text" in part && part.text)
+                return part.text;
+            return "";
+        })
             .filter(Boolean)
             .join("\n");
     }
@@ -33,10 +32,6 @@ function flattenContent(content) {
 }
 /**
  * Extract system messages and non-system messages separately.
- *
- * System messages are passed via --system-prompt to Claude CLI,
- * which ensures they are treated as actual system instructions
- * rather than user text that the model may ignore.
  */
 export function extractSystemAndPrompt(messages) {
     const systemParts = [];
@@ -46,17 +41,12 @@ export function extractSystemAndPrompt(messages) {
         switch (msg.role) {
             case "system":
             case "developer":
-                // Collect system/developer messages separately for --system-prompt
-                // OpenAI API uses "developer" role for reasoning models (o1, etc.)
-                // OpenClaw sends "developer" when model.reasoning is true
                 systemParts.push(text);
                 break;
             case "user":
-                // User messages are the main prompt
                 promptParts.push(text);
                 break;
             case "assistant":
-                // Previous assistant responses for context
                 promptParts.push(`<previous_response>\n${text}\n</previous_response>\n`);
                 break;
         }
@@ -68,8 +58,6 @@ export function extractSystemAndPrompt(messages) {
 }
 /**
  * Extract only the last user message for resume mode.
- * When resuming a session, Claude CLI loads history from disk —
- * we only need to send the new message.
  */
 export function extractLastUserMessage(messages) {
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -84,7 +72,6 @@ export function extractLastUserMessage(messages) {
  */
 export function openaiToCli(request, isResume = false) {
     if (isResume) {
-        // On resume, only send the latest user message — CLI has the rest
         return {
             prompt: extractLastUserMessage(request.messages),
             systemPrompt: undefined,

@@ -3,22 +3,23 @@
  *
  * Maps Clawdbot conversation IDs to Claude CLI session IDs
  * for maintaining conversation context across requests.
+ *
+ * Phase 3b: Session resume failure tracking — auto-invalidate after consecutive failures
  */
 import { v4 as uuidv4 } from "uuid";
 import fs from "fs/promises";
 import fsSync from "fs";
 import path from "path";
+import { log } from "../logger.js";
 const SESSION_FILE = path.join(process.env.HOME || "/tmp", ".claude-code-cli-sessions.json");
-// Session TTL: 24 hours
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+const MAX_TASKS_PER_SESSION = 50;
+const MAX_RESUME_FAILURES = 2;
 class SessionManager {
     sessions = new Map();
     loaded = false;
     dirty = false;
     saveTimer = null;
-    /**
-     * Load sessions from disk
-     */
     async load() {
         if (this.loaded)
             return;
@@ -30,38 +31,34 @@ class SessionManager {
             console.log(`[SessionManager] Loaded ${this.sessions.size} sessions`);
         }
         catch {
-            // File doesn't exist or is invalid, start fresh
             this.sessions = new Map();
             this.loaded = true;
         }
     }
-    /**
-     * Save sessions to disk (synchronous — only for shutdown hooks)
-     */
     saveSync() {
         try {
             const data = Object.fromEntries(this.sessions);
             fsSync.writeFileSync(SESSION_FILE, JSON.stringify(data, null, 2));
             this.dirty = false;
-        } catch (err) {
+        }
+        catch (err) {
             console.error("[SessionManager] Sync save error:", err);
         }
     }
-    /**
-     * Schedule an async save debounced to 1 second.
-     * Prevents blocking the event loop on every mutation.
-     */
     scheduleSave() {
         this.dirty = true;
-        if (this.saveTimer) return; // Already scheduled
+        if (this.saveTimer)
+            return;
         this.saveTimer = setTimeout(async () => {
             this.saveTimer = null;
-            if (!this.dirty) return;
+            if (!this.dirty)
+                return;
             try {
                 const data = Object.fromEntries(this.sessions);
                 await fs.writeFile(SESSION_FILE, JSON.stringify(data, null, 2));
                 this.dirty = false;
-            } catch (err) {
+            }
+            catch (err) {
                 console.error("[SessionManager] Async save error:", err);
             }
         }, 1000);
@@ -72,23 +69,28 @@ class SessionManager {
     /**
      * Get or create a Claude session ID for a Clawdbot conversation.
      * Returns { sessionId, isResume } so callers know whether to use --resume.
-     * Validates session age before resuming — stale sessions get fresh IDs.
      */
     getOrCreate(clawdbotId, model = "sonnet") {
         const existing = this.sessions.get(clawdbotId);
         if (existing) {
-            // Check session health: if last used > 6 hours ago, create fresh
             const ageMs = Date.now() - existing.lastUsedAt;
-            const MAX_RESUME_AGE_MS = 6 * 60 * 60 * 1000; // 6 hours
+            const MAX_RESUME_AGE_MS = 6 * 60 * 60 * 1000;
             if (ageMs > MAX_RESUME_AGE_MS) {
                 console.log(`[SessionManager] Session ${clawdbotId} stale (${Math.round(ageMs / 3600000)}h), creating fresh`);
                 this.sessions.delete(clawdbotId);
-                // Fall through to create new session
-            } else {
-                existing.lastUsedAt = Date.now();
-                existing.model = model;
-                this.scheduleSave();
-                return { sessionId: existing.claudeSessionId, isResume: true };
+            }
+            else {
+                existing.taskCount = (existing.taskCount || 0) + 1;
+                if (existing.taskCount > MAX_TASKS_PER_SESSION) {
+                    console.log(`[SessionManager] Session ${clawdbotId} hit task limit (${existing.taskCount}), resetting`);
+                    this.sessions.delete(clawdbotId);
+                }
+                else {
+                    existing.lastUsedAt = Date.now();
+                    existing.model = model;
+                    this.scheduleSave();
+                    return { sessionId: existing.claudeSessionId, isResume: true };
+                }
             }
         }
         const claudeSessionId = uuidv4();
@@ -98,31 +100,71 @@ class SessionManager {
             createdAt: Date.now(),
             lastUsedAt: Date.now(),
             model,
+            taskCount: 0,
+            resumeFailures: 0,
         };
         this.sessions.set(clawdbotId, mapping);
-        console.log(`[SessionManager] Created session: ${clawdbotId} -> ${claudeSessionId}`);
+        log("session.created", { conversationId: clawdbotId, sessionId: claudeSessionId.slice(0, 8) });
         this.scheduleSave();
         return { sessionId: claudeSessionId, isResume: false };
     }
-    /**
-     * Get existing session if it exists
-     */
     get(clawdbotId) {
         return this.sessions.get(clawdbotId);
     }
-    /**
-     * Delete a session
-     */
     delete(clawdbotId) {
         const deleted = this.sessions.delete(clawdbotId);
         if (deleted) {
+            log("session.invalidate", { conversationId: clawdbotId });
             this.scheduleSave();
         }
         return deleted;
     }
     /**
-     * Clean up expired sessions
+     * Mark a session as having a resume failure.
+     * After MAX_RESUME_FAILURES consecutive failures, auto-invalidate the session.
      */
+    markFailed(clawdbotId) {
+        const existing = this.sessions.get(clawdbotId);
+        if (!existing)
+            return;
+        existing.resumeFailures = (existing.resumeFailures || 0) + 1;
+        log("session.resume_fail", {
+            conversationId: clawdbotId,
+            failures: existing.resumeFailures,
+        });
+        if (existing.resumeFailures >= MAX_RESUME_FAILURES) {
+            log("session.invalidate", {
+                conversationId: clawdbotId,
+                reason: `${existing.resumeFailures} consecutive resume failures`,
+            });
+            this.sessions.delete(clawdbotId);
+        }
+        this.scheduleSave();
+    }
+    /**
+     * Reset failure count on successful resume.
+     */
+    markSuccess(clawdbotId) {
+        const existing = this.sessions.get(clawdbotId);
+        if (existing && existing.resumeFailures) {
+            existing.resumeFailures = 0;
+            this.scheduleSave();
+        }
+    }
+    /**
+     * Get resume failure stats for health endpoint.
+     */
+    getFailureStats() {
+        let totalFailures = 0;
+        let sessionsWithFailures = 0;
+        for (const [, session] of this.sessions) {
+            if (session.resumeFailures && session.resumeFailures > 0) {
+                totalFailures += session.resumeFailures;
+                sessionsWithFailures++;
+            }
+        }
+        return { totalFailures, sessionsWithFailures };
+    }
     cleanup() {
         const cutoff = Date.now() - SESSION_TTL_MS;
         let removed = 0;
@@ -138,28 +180,16 @@ class SessionManager {
         }
         return removed;
     }
-    /**
-     * Get all active sessions
-     */
     getAll() {
         return Array.from(this.sessions.values());
     }
-    /**
-     * Get session count
-     */
     get size() {
         return this.sessions.size;
     }
 }
-// Singleton instance
 export const sessionManager = new SessionManager();
-// Initialize on module load
 sessionManager.load().catch((err) => console.error("[SessionManager] Load error:", err));
-// Periodic cleanup every hour
 setInterval(() => {
     sessionManager.cleanup();
 }, 60 * 60 * 1000);
-// Flush dirty state on shutdown (sync to prevent data loss)
-process.on("SIGTERM", () => { if (sessionManager.dirty) sessionManager.saveSync(); });
-process.on("SIGINT", () => { if (sessionManager.dirty) sessionManager.saveSync(); });
 //# sourceMappingURL=manager.js.map

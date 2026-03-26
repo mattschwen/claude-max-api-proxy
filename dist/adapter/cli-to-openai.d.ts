@@ -1,6 +1,3 @@
-/**
- * Converts Claude CLI output to OpenAI-compatible response format
- */
 import type { ClaudeCliAssistant, ClaudeCliResult } from "../types/claude-cli.js";
 import type { OpenAIChatResponse, OpenAIChatChunk } from "../types/openai.js";
 /**

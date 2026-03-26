@@ -1,26 +1,32 @@
-/**
- * Converts OpenAI chat request format to Claude CLI input
- */
-import type { OpenAIChatRequest } from "../types/openai.js";
+import type { OpenAIChatRequest, OpenAIChatMessage } from "../types/openai.js";
 export type ClaudeModel = "opus" | "sonnet" | "haiku";
 export interface CliInput {
     prompt: string;
     model: ClaudeModel;
     sessionId?: string;
+    systemPrompt?: string;
+    isResume?: boolean;
+    thinkingBudget?: number;
+    _conversationId?: string;
+    _startTime?: number;
 }
 /**
- * Extract Claude model alias from request model string
+ * Extract Claude model alias from request model string.
  */
 export declare function extractModel(model: string): ClaudeModel;
 /**
- * Convert OpenAI messages array to a single prompt string for Claude CLI
- *
- * Claude Code CLI in --print mode expects a single prompt, not a conversation.
- * We format the messages into a readable format that preserves context.
+ * Extract system messages and non-system messages separately.
  */
-export declare function messagesToPrompt(messages: OpenAIChatRequest["messages"]): string;
+export declare function extractSystemAndPrompt(messages: OpenAIChatMessage[]): {
+    systemPrompt: string | undefined;
+    prompt: string;
+};
+/**
+ * Extract only the last user message for resume mode.
+ */
+export declare function extractLastUserMessage(messages: OpenAIChatMessage[]): string;
 /**
  * Convert OpenAI chat request to CLI input format
  */
-export declare function openaiToCli(request: OpenAIChatRequest): CliInput;
+export declare function openaiToCli(request: OpenAIChatRequest, isResume?: boolean): CliInput;
 //# sourceMappingURL=openai-to-cli.d.ts.map

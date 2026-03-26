@@ -6,40 +6,30 @@
 import express from "express";
 import { createServer } from "http";
 import { handleChatCompletions, handleModels, handleHealth } from "./routes.js";
-// Eagerly initialize pool and store on server start
 import "../subprocess/pool.js";
 import "../store/conversation.js";
 let serverInstance = null;
-/**
- * Create and configure the Express app
- */
 function createApp() {
     const app = express();
-    // Middleware
     app.use(express.json({ limit: "10mb" }));
-    // Request logging (debug mode)
     app.use((req, _res, next) => {
         if (process.env.DEBUG) {
             console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
         }
         next();
     });
-    // CORS headers for local development
     app.use((_req, res, next) => {
         res.setHeader("Access-Control-Allow-Origin", "*");
         res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
         res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
         next();
     });
-    // Handle OPTIONS preflight
     app.options("*", (_req, res) => {
         res.sendStatus(200);
     });
-    // Routes
     app.get("/health", handleHealth);
     app.get("/v1/models", handleModels);
     app.post("/v1/chat/completions", handleChatCompletions);
-    // 404 handler
     app.use((_req, res) => {
         res.status(404).json({
             error: {
@@ -49,7 +39,6 @@ function createApp() {
             },
         });
     });
-    // Error handler
     app.use((err, _req, res, _next) => {
         console.error("[Server Error]:", err.message);
         res.status(500).json({
@@ -62,9 +51,6 @@ function createApp() {
     });
     return app;
 }
-/**
- * Start the HTTP server
- */
 export async function startServer(config) {
     const { port, host = "127.0.0.1" } = config;
     if (serverInstance) {
@@ -74,9 +60,7 @@ export async function startServer(config) {
     const app = createApp();
     return new Promise((resolve, reject) => {
         serverInstance = createServer(app);
-        // Disable Nagle's algorithm — flush SSE chunks immediately instead of
-        // batching small writes (eliminates 200-500ms stalls between chunks)
-        serverInstance.on('connection', (socket) => {
+        serverInstance.on("connection", (socket) => {
             socket.setNoDelay(true);
         });
         serverInstance.on("error", (err) => {
@@ -94,13 +78,9 @@ export async function startServer(config) {
         });
     });
 }
-/**
- * Stop the HTTP server
- */
 export async function stopServer() {
-    if (!serverInstance) {
+    if (!serverInstance)
         return;
-    }
     return new Promise((resolve, reject) => {
         serverInstance.close((err) => {
             if (err) {
@@ -114,9 +94,6 @@ export async function stopServer() {
         });
     });
 }
-/**
- * Get the current server instance
- */
 export function getServer() {
     return serverInstance;
 }

@@ -1,55 +1,54 @@
-/**
- * Claude Code CLI Subprocess Manager
- *
- * Handles spawning, managing, and parsing output from Claude CLI subprocesses.
- * Uses spawn() instead of exec() to prevent shell injection vulnerabilities.
- */
 import { EventEmitter } from "events";
-import type { ClaudeCliMessage, ClaudeCliAssistant, ClaudeCliResult } from "../types/claude-cli.js";
+import type { ClaudeCliMessage, ClaudeCliAssistant, ClaudeCliResult, ClaudeCliStreamEvent } from "../types/claude-cli.js";
 import type { ClaudeModel } from "../adapter/openai-to-cli.js";
 export interface SubprocessOptions {
     model: ClaudeModel;
     sessionId?: string;
+    systemPrompt?: string;
+    isResume?: boolean;
     cwd?: string;
-    timeout?: number;
+    thinkingBudget?: number;
 }
 export interface SubprocessEvents {
     message: (msg: ClaudeCliMessage) => void;
+    content_delta: (msg: ClaudeCliStreamEvent) => void;
     assistant: (msg: ClaudeCliAssistant) => void;
     result: (result: ClaudeCliResult) => void;
     error: (error: Error) => void;
     close: (code: number | null) => void;
     raw: (line: string) => void;
 }
+/**
+ * Global subprocess registry for server-wide cleanup.
+ * Tracks all active subprocesses so graceful shutdown can kill them all.
+ */
+declare class SubprocessRegistry {
+    private active;
+    register(subprocess: ClaudeSubprocess): void;
+    unregister(subprocess: ClaudeSubprocess): void;
+    killAll(): void;
+    getActivePids(): number[];
+    get size(): number;
+}
+export declare const subprocessRegistry: SubprocessRegistry;
 export declare class ClaudeSubprocess extends EventEmitter {
     private process;
     private buffer;
-    private timeoutId;
-    private isKilled;
+    private killed;
+    private escalationTimer;
     /**
-     * Start the Claude CLI subprocess with the given prompt
+     * Start the Claude CLI subprocess with the given prompt.
+     * No timeout is set here — caller owns timeout behavior (Phase 1c).
      */
     start(prompt: string, options: SubprocessOptions): Promise<void>;
-    /**
-     * Build CLI arguments array
-     */
     private buildArgs;
-    /**
-     * Process the buffer and emit parsed messages
-     */
     private processBuffer;
     /**
-     * Clear the timeout timer
+     * Kill the subprocess with escalation: SIGTERM -> SIGKILL after 5s grace.
      */
-    private clearTimeout;
-    /**
-     * Kill the subprocess
-     */
-    kill(signal?: NodeJS.Signals): void;
-    /**
-     * Check if the process is still running
-     */
+    kill(): void;
     isRunning(): boolean;
+    getPid(): number | null;
 }
 /**
  * Verify that Claude CLI is installed and accessible
@@ -61,13 +60,10 @@ export declare function verifyClaude(): Promise<{
 }>;
 /**
  * Check if Claude CLI is authenticated
- *
- * Claude Code stores credentials in the OS keychain, not a file.
- * We verify authentication by checking if we can call the CLI successfully.
- * If the CLI is installed, it typically has valid credentials from `claude auth login`.
  */
 export declare function verifyAuth(): Promise<{
     ok: boolean;
     error?: string;
 }>;
+export {};
 //# sourceMappingURL=manager.d.ts.map

@@ -6,47 +6,17 @@
  */
 import { startServer, stopServer, getServer } from "./server/index.js";
 import { verifyClaude, verifyAuth } from "./subprocess/manager.js";
-// Provider constants
 const PROVIDER_ID = "claude-code-cli";
 const PROVIDER_LABEL = "Claude Code CLI";
 const DEFAULT_PORT = 3456;
 const DEFAULT_MODEL = "claude-code-cli/claude-sonnet-4";
-// Available models
 const AVAILABLE_MODELS = [
-    {
-        id: "claude-opus-4",
-        name: "Claude Opus 4.6",
-        alias: "opus",
-        reasoning: true,
-    },
-    {
-        id: "claude-opus-4-6",
-        name: "Claude Opus 4.6",
-        alias: "opus",
-        reasoning: true,
-    },
-    {
-        id: "claude-opus-4-5",
-        name: "Claude Opus 4.5",
-        alias: "opus",
-        reasoning: true,
-    },
-    {
-        id: "claude-sonnet-4",
-        name: "Claude Sonnet 4",
-        alias: "sonnet",
-        reasoning: false,
-    },
-    {
-        id: "claude-haiku-4",
-        name: "Claude Haiku 4",
-        alias: "haiku",
-        reasoning: false,
-    },
+    { id: "claude-opus-4", name: "Claude Opus 4.6", alias: "opus", reasoning: true },
+    { id: "claude-opus-4-6", name: "Claude Opus 4.6", alias: "opus", reasoning: true },
+    { id: "claude-opus-4-5", name: "Claude Opus 4.5", alias: "opus", reasoning: true },
+    { id: "claude-sonnet-4", name: "Claude Sonnet 4", alias: "sonnet", reasoning: false },
+    { id: "claude-haiku-4", name: "Claude Haiku 4", alias: "haiku", reasoning: false },
 ];
-/**
- * Build model definitions for Clawdbot config
- */
 function buildModelDefinition(model) {
     return {
         id: model.id,
@@ -59,9 +29,6 @@ function buildModelDefinition(model) {
         maxTokens: 8192,
     };
 }
-/**
- * Empty plugin config schema (no user configuration needed)
- */
 function emptyPluginConfigSchema() {
     return {
         type: "object",
@@ -69,9 +36,6 @@ function emptyPluginConfigSchema() {
         additionalProperties: false,
     };
 }
-/**
- * Plugin definition
- */
 const claudeCodeCliPlugin = {
     id: "claude-code-cli-provider",
     name: "Claude Code CLI Provider",
@@ -79,23 +43,22 @@ const claudeCodeCliPlugin = {
     configSchema: emptyPluginConfigSchema(),
     register(api) {
         let serverPort = DEFAULT_PORT;
-        // Register the provider
         api.registerProvider({
             id: PROVIDER_ID,
             label: PROVIDER_LABEL,
             docsPath: "/providers/claude-code-cli",
             aliases: ["claude-cli", "claude-max"],
-            envVars: [], // No env vars needed - uses Claude CLI auth
+            envVars: [],
             auth: [
                 {
                     id: "local",
                     label: "Local Claude CLI",
                     hint: "Uses your existing Claude Code CLI authentication (from Claude Max)",
                     kind: "custom",
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
                     run: async (ctx) => {
                         const spin = ctx.prompter.progress("Checking Claude CLI...");
                         try {
-                            // 1. Verify Claude CLI is installed
                             const cliCheck = await verifyClaude();
                             if (!cliCheck.ok) {
                                 spin.stop("Claude CLI not found");
@@ -103,7 +66,6 @@ const claudeCodeCliPlugin = {
                                 throw new Error(cliCheck.error);
                             }
                             spin.message("Claude CLI found, checking auth...");
-                            // 2. Verify authentication
                             const authCheck = await verifyAuth();
                             if (!authCheck.ok) {
                                 spin.stop("Not authenticated");
@@ -111,7 +73,6 @@ const claudeCodeCliPlugin = {
                                 throw new Error(authCheck.error);
                             }
                             spin.message("Authenticated, starting server...");
-                            // 3. Ask for port
                             const portInput = await ctx.prompter.text({
                                 message: "Local server port",
                                 initialValue: String(DEFAULT_PORT),
@@ -124,7 +85,6 @@ const claudeCodeCliPlugin = {
                                 },
                             });
                             serverPort = parseInt(portInput, 10);
-                            // 4. Start the local server
                             await startServer({ port: serverPort });
                             spin.stop("Claude CLI provider ready");
                             const baseUrl = `http://127.0.0.1:${serverPort}/v1`;
@@ -135,7 +95,7 @@ const claudeCodeCliPlugin = {
                                         credential: {
                                             type: "token",
                                             provider: PROVIDER_ID,
-                                            token: "local", // Dummy token - CLI handles auth
+                                            token: "local",
                                         },
                                     },
                                 ],
@@ -153,10 +113,7 @@ const claudeCodeCliPlugin = {
                                     },
                                     agents: {
                                         defaults: {
-                                            models: Object.fromEntries(AVAILABLE_MODELS.map((m) => [
-                                                `${PROVIDER_ID}/${m.id}`,
-                                                {},
-                                            ])),
+                                            models: Object.fromEntries(AVAILABLE_MODELS.map((m) => [`${PROVIDER_ID}/${m.id}`, {}])),
                                         },
                                     },
                                 },
@@ -177,7 +134,6 @@ const claudeCodeCliPlugin = {
                 },
             ],
         });
-        // Handle plugin unload
         api.on("plugin:unload", async () => {
             const server = getServer();
             if (server) {
@@ -185,7 +141,7 @@ const claudeCodeCliPlugin = {
                 await stopServer();
             }
         });
-        // Register CLI command for manual server control
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         api.registerCli?.((cli) => {
             cli
                 .command("claude-cli:start [port]")
@@ -219,7 +175,6 @@ const claudeCodeCliPlugin = {
     },
 };
 export default claudeCodeCliPlugin;
-// Also export server utilities for standalone use
 export { startServer, stopServer, getServer } from "./server/index.js";
 export { ClaudeSubprocess, verifyClaude, verifyAuth } from "./subprocess/manager.js";
 export { sessionManager } from "./session/manager.js";

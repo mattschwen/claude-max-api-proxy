@@ -3,8 +3,11 @@
  * Used for Clawdbot integration
  */
 export interface OpenAIChatMessage {
-    role: "system" | "user" | "assistant";
-    content: string;
+    role: "system" | "user" | "assistant" | "developer";
+    content: string | Array<{
+        type?: string;
+        text?: string;
+    } | string>;
 }
 export interface OpenAIChatRequest {
     model: string;
@@ -16,6 +19,10 @@ export interface OpenAIChatRequest {
     frequency_penalty?: number;
     presence_penalty?: number;
     user?: string;
+    thinking?: {
+        type?: string;
+        budget_tokens?: number;
+    };
 }
 export interface OpenAIChatResponseChoice {
     index: number;
@@ -52,6 +59,11 @@ export interface OpenAIChatChunk {
     created: number;
     model: string;
     choices: OpenAIChatChunkChoice[];
+    usage?: {
+        prompt_tokens: number;
+        completion_tokens: number;
+        total_tokens: number;
+    };
 }
 export interface OpenAIModel {
     id: string;
