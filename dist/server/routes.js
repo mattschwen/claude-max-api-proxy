@@ -305,7 +305,6 @@ function runStreamingSubprocess(opts) {
                 // Phase 5b: Mark as failed for retry (don't delete - it may be recoverable)
                 if (cliInput._conversationId) {
                     sessionManager.markFailed(cliInput._conversationId);
-                    n;
                 }
                 if (!clientDisconnected && !res.writableEnded) {
                     res.write(`data: ${JSON.stringify({

@@ -18,6 +18,8 @@ export type LogEvent =
   | "session.invalidate"
   | "session.resume_fail"
   | "session.created"
+  | "session.context"
+  | "token.validation_failed"
   | "queue.enqueue"
   | "queue.blocked"
   | "queue.timeout"

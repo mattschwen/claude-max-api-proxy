@@ -4,7 +4,7 @@
  * Emits structured log entries for key proxy events.
  * All entries include timestamp and event type.
  */
-export type LogEvent = "request.start" | "request.complete" | "request.retry" | "request.timeout" | "request.error" | "subprocess.spawn" | "subprocess.stall" | "subprocess.kill" | "subprocess.close" | "session.invalidate" | "session.resume_fail" | "session.created" | "queue.enqueue" | "queue.blocked" | "queue.timeout" | "health.check" | "server.shutdown" | "server.start";
+export type LogEvent = "request.start" | "request.complete" | "request.retry" | "request.timeout" | "request.error" | "subprocess.spawn" | "subprocess.stall" | "subprocess.kill" | "subprocess.close" | "session.invalidate" | "session.resume_fail" | "session.created" | "session.context" | "token.validation_failed" | "queue.enqueue" | "queue.blocked" | "queue.timeout" | "health.check" | "server.shutdown" | "server.start";
 export interface LogEntry {
     ts: string;
     event: LogEvent;
