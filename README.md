@@ -1,768 +1,258 @@
-# Claude Max API Proxy
+<div align="center">
 
-Use a locally authenticated Claude Code CLI session as an OpenAI-compatible API server.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./assets/banner-dark.svg">
+  <img alt="claude-max-api-proxy — An OpenAI-compatible API server powered by Claude Code CLI." src="./assets/banner-light.svg" width="100%">
+</picture>
 
-This project runs a local HTTP server that translates OpenAI-style `/v1/chat/completions` requests into Claude Code CLI subprocess calls. It is intended for tools such as OpenClaw, Continue.dev, scripts, and other OpenAI-compatible clients that you want to point at your own Claude CLI login instead of a separate API billing path.
+<br/>
 
-## What This Project Does
+<p>
+  <a href="#quickstart"><img alt="quickstart" src="https://img.shields.io/badge/quickstart-60s-ff7a3c?style=flat-square&labelColor=1a0f1e"></a>
+  <a href="./LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-f5efe7?style=flat-square&labelColor=1a0f1e"></a>
+  <img alt="node" src="https://img.shields.io/badge/node-%E2%89%A522-4ade80?style=flat-square&labelColor=1a0f1e">
+  <img alt="typescript" src="https://img.shields.io/badge/typescript-strict-3178c6?style=flat-square&labelColor=1a0f1e">
+  <img alt="status" src="https://img.shields.io/badge/status-production-16a34a?style=flat-square&labelColor=1a0f1e">
+</p>
 
-- Exposes an OpenAI-compatible API at `http://127.0.0.1:3456/v1`
-- Uses your existing `claude` CLI authentication on that machine
-- Supports streaming and non-streaming chat completions
-- Preserves conversation continuity when the client sends a stable `user` value
-- Detects which Claude models are actually available to the current CLI account
-- Applies queueing and cancellation rules per conversation to avoid indefinite hangs
+<p>
+  <b>Point any OpenAI-compatible client at your Claude Max plan.</b><br/>
+  Wraps the authenticated <code>claude</code> CLI in an OpenAI-shaped HTTP API.
+</p>
 
-## What Another Service Needs To Know
+<p>
+  <a href="#quickstart">Quickstart</a> ·
+  <a href="#why">Why</a> ·
+  <a href="#features">Features</a> ·
+  <a href="./docs/API.md">API</a> ·
+  <a href="./docs/CONFIGURATION.md">Config</a> ·
+  <a href="./docs/ARCHITECTURE.md">Architecture</a> ·
+  <a href="./docs/TROUBLESHOOTING.md">Troubleshooting</a>
+</p>
 
-If you hand this repository to another service, agent, or installer, these are the important operational facts:
+</div>
 
-- This server depends on a working local `claude` CLI installation, not direct Anthropic API keys.
-- The machine must already be authenticated with `claude auth login`.
-- The authoritative source of available models is `GET /v1/models`.
-- `/v1/models` is dynamic. It is not a fixed hard-coded promise that every listed model will work on every machine.
-- If `GET /v1/models` returns `{"object":"list","data":[]}`, the proxy may be installed correctly, but the Claude CLI account on that machine does not currently have access to any configured models.
-- Requests for the same conversation are coordinated by the `user` field. If the client wants multi-turn continuity, it must reuse the same `user` value.
-- The default same-conversation policy is `latest-wins`. A new request for the same conversation cancels the older in-flight request and drops stale queued requests for that conversation.
-- If a streaming client disconnects, the underlying Claude subprocess is killed immediately so the queue can unblock.
-- The standalone server binds to `127.0.0.1` by default. It is intended for local use unless you deliberately place it behind your own reverse proxy or change the bind behavior in code.
+---
 
-## Requirements
+## Why
 
-- Node.js 22+ recommended for fresh installs
-- npm
-- Claude Code CLI installed globally
-- A Claude account authenticated in the CLI on that machine
-- Access to at least one supported Claude model through that CLI login
+You already pay for Claude Max. Your local `claude` CLI is already authenticated. But every OpenAI-compatible tool on your machine — Continue.dev, OpenClaw, Aider, your own scripts — wants to talk to a `baseURL` and get back an OpenAI-shaped response.
 
-Install the CLI if needed:
+**`claude-max-api-proxy` is that `baseURL`.**
 
-```bash
-npm install -g @anthropic-ai/claude-code
-```
+It runs a tiny local HTTP server on `127.0.0.1:3456`, translates OpenAI `/v1/chat/completions` calls into Claude Code CLI subprocess invocations, and hands the streaming output back in the exact shape your OpenAI client expects. No separate API keys. No extra billing. Just your existing Max subscription, reused.
 
-Authenticate if needed:
+## Features
 
-```bash
-claude auth login
-```
-
-Verify authentication:
-
-```bash
-claude auth status
-```
-
-Verify the CLI binary exists:
-
-```bash
-claude --version
-```
-
-## Fast Install
-
-```bash
-git clone https://github.com/mattschwen/claude-max-api-proxy.git
-cd claude-max-api-proxy
-npm install
-npm run build
-npm test
-npm start
-```
-
-Then validate in a second terminal:
-
-```bash
-curl http://127.0.0.1:3456/health
-curl http://127.0.0.1:3456/v1/models
-```
-
-If `/v1/models` returns an empty `data` array, stop there and fix Claude CLI auth or account model access before connecting another client.
-
-## Full Install Procedure
-
-### 1. Install prerequisites
-
-```bash
-node --version
-npm --version
-claude --version
-```
-
-### 2. Verify Claude CLI authentication
-
-```bash
-claude auth status
-```
-
-If it is not logged in:
-
-```bash
-claude auth login
-```
-
-### 3. Clone the repository
-
-```bash
-git clone https://github.com/mattschwen/claude-max-api-proxy.git
-cd claude-max-api-proxy
-```
-
-### 4. Install dependencies
-
-```bash
-npm install
-```
-
-### 5. Build the project
-
-```bash
-npm run build
-```
-
-### 6. Run tests
-
-Tests run from the compiled `dist/` output:
-
-```bash
-npm test
-```
-
-### 7. Start the server
-
-```bash
-npm start
-```
-
-The standalone server will:
-
-- verify the `claude` binary
-- run `claude auth status`
-- probe model availability
-- print the active same-conversation policy
-- warn if no accessible models were detected
-
-You can also choose a custom port:
-
-```bash
-node dist/server/standalone.js 8080
-```
-
-### 8. Verify the health endpoint
-
-```bash
-curl http://127.0.0.1:3456/health
-```
-
-Important fields in the response:
-
-- `status`
-- `config.sameConversationPolicy`
-- `config.debugQueues`
-- `auth`
-- `models.available`
-- `models.unavailable`
-- `queues`
-- `subprocesses`
-- `sessions`
-
-Example:
-
-```json
-{
-  "status": "ok",
-  "provider": "claude-code-cli",
-  "config": {
-    "sameConversationPolicy": "latest-wins",
-    "debugQueues": false
-  },
-  "auth": {
-    "loggedIn": true
-  },
-  "models": {
-    "available": ["claude-sonnet-4-6", "claude-opus-4-6"],
-    "unavailable": []
-  }
-}
-```
-
-### 9. Verify model availability
-
-```bash
-curl http://127.0.0.1:3456/v1/models
-```
-
-Expected shape:
-
-```json
-{
-  "object": "list",
-  "data": [
-    {
-      "id": "claude-sonnet-4-6",
-      "object": "model",
-      "owned_by": "anthropic",
-      "created": 1710000000
-    }
-  ]
-}
-```
-
-If the `data` array is empty, do not connect another service yet. The proxy is running, but this machine cannot currently use any configured Claude models through the CLI.
-
-### 10. Send a non-streaming test request
-
-```bash
-curl -X POST http://127.0.0.1:3456/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "claude-sonnet-4",
-    "messages": [
-      { "role": "user", "content": "Reply with exactly: hello" }
-    ]
-  }'
-```
-
-### 11. Send a streaming test request
-
-```bash
-curl -N -X POST http://127.0.0.1:3456/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "claude-sonnet-4",
-    "stream": true,
-    "messages": [
-      { "role": "user", "content": "Count from 1 to 5 slowly" }
-    ]
-  }'
-```
-
-## Connecting Another Service
-
-### Generic OpenAI-compatible settings
-
-Use these defaults for any OpenAI-compatible client:
-
-| Setting | Value |
+|  |  |
 | --- | --- |
-| Base URL | `http://127.0.0.1:3456/v1` |
-| API key | Any non-empty string |
-| Chat endpoint | `/chat/completions` |
-| Models | Whatever `GET /v1/models` returns |
+| 🔌 **Drop-in OpenAI API** | `/v1/chat/completions`, `/v1/models`, and `/health` — streaming and non-streaming. |
+| 🔑 **Zero API keys** | Uses your machine's existing `claude auth login` session. |
+| 🧠 **Multi-model** | Auto-detects which Claude models your account actually has access to. |
+| ♻️ **Session continuity** | Reuses the same `user` field as a conversation key; transparently resumes CLI sessions. |
+| ⚡ **Warm subprocess pool** | Keeps `claude` processes pre-spawned so first-token latency stays low. |
+| 🛡️ **Stall detection + kill escalation** | Per-family stall timeouts, SIGTERM → SIGKILL grace, graceful shutdown. |
+| 📊 **Rich `/health`** | Live auth, model probes, pool, queues, subprocesses, recent errors — one endpoint. |
+| 🔄 **Same-conversation policy** | `latest-wins` or `queue` — you pick. Prevents unbounded backlog. |
+| 🪵 **Structured JSON logs** | Every request, queue event, subprocess lifecycle, session event. |
+| 🧩 **TypeScript, strict mode** | Clean module layout, no `any` escape hatches. |
 
-Notes:
+## Quickstart
 
-- The proxy ignores the API key, but many clients require one to be present.
-- Use a model that is actually returned by `/v1/models`.
-- Reuse a stable `user` value per chat thread if the client allows it.
+You need **Node.js 22+**, **npm**, and the **Claude Code CLI** already logged in.
 
-### OpenClaw
+```bash
+# 1. Install Claude CLI and log in (skip if you already have it)
+npm install -g @anthropic-ai/claude-code
+claude auth login
 
-Point OpenClaw at:
-
-- Base URL: `http://127.0.0.1:3456/v1`
-- API key: any placeholder string
-- Model: one returned by `/v1/models`
-
-Behavior that matters for OpenClaw:
-
-- If OpenClaw sends another message for the same conversation while the first is still running, the default `latest-wins` policy cancels the older request.
-- If you want strict per-conversation FIFO instead, set `CLAUDE_PROXY_SAME_CONVERSATION_POLICY=queue` before starting the server.
-- If OpenClaw appears slow or returns nothing, check `/health`, then check whether the conversation is blocked in `queues`, whether queue debug logging is enabled, and whether the current Claude session actually has model access.
-
-### Continue.dev example
-
-```json
-{
-  "models": [
-    {
-      "title": "Claude via local CLI",
-      "provider": "openai",
-      "model": "claude-sonnet-4",
-      "apiBase": "http://127.0.0.1:3456/v1",
-      "apiKey": "local"
-    }
-  ]
-}
+# 2. Clone, install, start
+git clone https://github.com/mattschwen/claude-max-api-proxy.git
+cd claude-max-api-proxy
+npm install
+npm start
 ```
 
-### Python example
+The server warms up in ~15–25 s (it probes your authenticated account for available models on startup), then binds to `http://127.0.0.1:3456`.
+
+```bash
+# Verify
+curl http://127.0.0.1:3456/health
+curl http://127.0.0.1:3456/v1/models
+```
+
+> [!IMPORTANT]
+> If `/v1/models` returns `{"object":"list","data":[]}`, stop here. The proxy is running but your Claude CLI account can't access any models. Fix auth first — see [Troubleshooting](./docs/TROUBLESHOOTING.md).
+
+## Usage
+
+### From any OpenAI SDK
 
 ```python
 from openai import OpenAI
 
 client = OpenAI(
     base_url="http://127.0.0.1:3456/v1",
-    api_key="local"
+    api_key="ignored",  # proxy doesn't check it, but most SDKs require a value
 )
 
-response = client.chat.completions.create(
-    model="claude-sonnet-4",
-    messages=[
-        {"role": "user", "content": "Say hello in one word."}
-    ]
+resp = client.chat.completions.create(
+    model="claude-sonnet-4-6",
+    messages=[{"role": "user", "content": "Say hi in one word."}],
 )
-
-print(response.choices[0].message.content)
+print(resp.choices[0].message.content)
 ```
 
-## Available Models
+```typescript
+import OpenAI from "openai";
 
-The code recognizes a known set of model IDs, but the public list is filtered at runtime by real CLI access checks.
+const client = new OpenAI({
+  baseURL: "http://127.0.0.1:3456/v1",
+  apiKey: "ignored",
+});
 
-Known model IDs in the codebase:
+const resp = await client.chat.completions.create({
+  model: "claude-sonnet-4-6",
+  messages: [{ role: "user", content: "Say hi in one word." }],
+});
+console.log(resp.choices[0].message.content);
+```
 
-- `claude-opus-4-6`
-- `claude-opus-4`
-- `claude-opus-4-5`
-- `claude-sonnet-4-6`
-- `claude-sonnet-4`
-- `claude-sonnet-4-5`
-- `claude-haiku-4-5`
-- `claude-haiku-4`
-
-Accepted family aliases:
-
-- `opus`
-- `sonnet`
-- `haiku`
-
-Accepted provider-style prefixes:
-
-- `maxproxy/...`
-- `claude-code-cli/...`
-
-Important rule:
-
-- The set of recognized IDs in code is not the same thing as the set of usable IDs on the current machine.
-- The usable list is the result of runtime probing and is exposed by `GET /v1/models`.
-
-## Runtime Configuration
-
-Set environment variables before starting the server.
-
-### Same conversation policy
+### From `curl`
 
 ```bash
+curl -N http://127.0.0.1:3456/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4-6",
+    "stream": true,
+    "messages": [{ "role": "user", "content": "Write a haiku about local proxies." }]
+  }'
+```
+
+### Connect common clients
+
+<details>
+<summary><b>Continue.dev</b></summary>
+
+```json
+{
+  "models": [
+    {
+      "title": "Claude via Max Proxy",
+      "provider": "openai",
+      "model": "claude-sonnet-4-6",
+      "apiBase": "http://127.0.0.1:3456/v1",
+      "apiKey": "local"
+    }
+  ]
+}
+```
+</details>
+
+<details>
+<summary><b>OpenClaw</b></summary>
+
+```json
+{
+  "providers": {
+    "claude-max-proxy": {
+      "baseUrl": "http://127.0.0.1:3456/v1",
+      "api": "openai-completions",
+      "auth": "api-key",
+      "apiKey": "ignored",
+      "models": [
+        { "id": "claude-sonnet-4-6" },
+        { "id": "claude-opus-4-6" }
+      ]
+    }
+  }
+}
+```
+</details>
+
+<details>
+<summary><b>Aider, LiteLLM, LangChain, anything OpenAI-compatible</b></summary>
+
+Use these defaults:
+
+| Setting      | Value                          |
+| ---          | ---                            |
+| Base URL     | `http://127.0.0.1:3456/v1`     |
+| API key      | any non-empty string           |
+| Model        | whatever `/v1/models` returns  |
+</details>
+
+## Configuration
+
+Everything is environment-variable driven. See [docs/CONFIGURATION.md](./docs/CONFIGURATION.md) for the full reference.
+
+```bash
+# Cancel in-flight request when a new one lands for the same conversation (default)
 export CLAUDE_PROXY_SAME_CONVERSATION_POLICY=latest-wins
-```
 
-Supported values:
+# Or: strict FIFO per conversation
+export CLAUDE_PROXY_SAME_CONVERSATION_POLICY=queue
 
-- `latest-wins` (default)
-- `queue`
-
-Meaning:
-
-- `latest-wins`: a newer request for the same conversation cancels the active request and drops older queued requests for that conversation.
-- `queue`: requests for the same conversation are processed in order without superseding each other.
-
-### Queue debug logging
-
-```bash
+# Extra visibility into queue internals
 export CLAUDE_PROXY_DEBUG_QUEUES=true
-```
 
-Supported values:
-
-- `true`
-- `false` (default)
-
-When enabled, the proxy emits extra structured log events for:
-
-- `queue.enqueue`
-- `queue.drop`
-- `queue.blocked`
-- `request.cancel`
-
-### Example startup with explicit config
-
-```bash
-export CLAUDE_PROXY_SAME_CONVERSATION_POLICY=latest-wins
-export CLAUDE_PROXY_DEBUG_QUEUES=true
 npm start
 ```
 
-## Request Behavior
+## Running as a service
 
-### Conversation continuity
+- **macOS** → [docs/macos-setup.md](./docs/macos-setup.md) (LaunchAgent, auto-start, KeepAlive)
+- **Linux** → use systemd with a unit file that runs `node dist/server/standalone.js`
+- **Docker** → not yet provided; contributions welcome
 
-The proxy uses the OpenAI-style `user` field as the conversation key.
+## Documentation
 
-If you want follow-up turns to continue the same Claude CLI session, reuse the same `user` value:
-
-```json
-{
-  "model": "claude-sonnet-4",
-  "user": "chat-123",
-  "messages": [
-    { "role": "user", "content": "Remember this number: 17" }
-  ]
-}
-```
-
-Then later:
-
-```json
-{
-  "model": "claude-sonnet-4",
-  "user": "chat-123",
-  "messages": [
-    { "role": "user", "content": "What number did I ask you to remember?" }
-  ]
-}
-```
-
-If `user` is omitted, the proxy treats the request as a new conversation and assigns an internal request ID.
-
-### Same-conversation cancellation policy
-
-Default behavior is `latest-wins`.
-
-That means:
-
-- only one active request per conversation
-- a new request for the same conversation supersedes stale work
-- older queued requests for that conversation are dropped
-
-This is the main reason a client can appear to stop the first request when a second message is sent before the first completes. That is intentional under the default policy.
-
-### Streaming disconnect behavior
-
-If the client closes the streaming response, the proxy kills the Claude subprocess immediately. This prevents a dead or abandoned stream from holding the conversation queue open.
-
-## Reliability And Safety Features
-
-### Activity-based stall detection
-
-The proxy resets the stall timer whenever content arrives. If the subprocess stops producing output long enough, it is killed and the queue is unblocked.
-
-Current stall timeouts:
-
-| Family | Stall timeout |
+| Doc | What's in it |
 | --- | --- |
-| Opus | 120s |
-| Sonnet | 90s |
-| Haiku | 45s |
+| [docs/API.md](./docs/API.md) | Full API reference — endpoints, request / response shapes, examples |
+| [docs/CONFIGURATION.md](./docs/CONFIGURATION.md) | Environment variables, timeouts, policies |
+| [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) | How the proxy works internally — pool, queues, sessions, logging |
+| [docs/TROUBLESHOOTING.md](./docs/TROUBLESHOOTING.md) | Every failure mode and how to fix it |
+| [docs/macos-setup.md](./docs/macos-setup.md) | LaunchAgent setup for auto-start on macOS |
+| [CONTRIBUTING.md](./CONTRIBUTING.md) | Dev setup, style, PR flow |
+| [SECURITY.md](./SECURITY.md) | How to report security issues |
 
-### Hard request timeouts
+## How it compares
 
-The proxy also enforces absolute wall-clock timeouts:
+|                                  | `claude-max-api-proxy` | Direct Anthropic API     | Claude Code CLI only      |
+| ---                              | :---:                  | :---:                    | :---:                     |
+| Uses your Max plan               | ✅                     | ❌ (separate billing)    | ✅                        |
+| OpenAI-compatible endpoints      | ✅                     | ❌                       | ❌                        |
+| Streaming                        | ✅                     | ✅                       | ✅                        |
+| Session continuity               | ✅                     | ⚠️ (manual)              | ✅                        |
+| Works with Continue/Aider/etc.   | ✅                     | ⚠️ (with LiteLLM etc.)   | ❌                        |
+| Requires API key                 | ❌                     | ✅                       | ❌                        |
 
-| Family | Hard timeout |
-| --- | --- |
-| Opus | 30 minutes |
-| Sonnet | 10 minutes |
-| Haiku | 2 minutes |
+## Requirements
 
-If extended thinking is enabled, these timeouts are multiplied by 3.
-
-### Resume failure tracking
-
-The proxy resumes Claude CLI sessions for multi-turn conversations. If resume fails twice consecutively for a conversation, the session is invalidated and a fresh one is created on the next request.
-
-### Retry behavior
-
-On subprocess failure, the proxy retries once with a fresh session rather than assuming resume is still safe.
-
-### Queue depth protection
-
-Per conversation, the proxy rejects requests when too many are already queued instead of allowing unbounded backlog growth.
-
-### Graceful shutdown
-
-On `SIGINT` or `SIGTERM`, the standalone server:
-
-- stops accepting new connections
-- waits briefly for active requests
-- kills remaining subprocesses
-- saves session state
-- exits cleanly
-
-## API Reference
-
-### `GET /health`
-
-Returns runtime state for operations and troubleshooting.
-
-Includes:
-
-- current config
-- auth snapshot
-- model availability snapshot
-- session failure stats
-- active subprocesses
-- queue state
-- conversation store metrics
-- recent errors
-
-### `GET /v1/models`
-
-Returns the currently accessible models for the authenticated Claude CLI account.
-
-Example:
-
-```bash
-curl http://127.0.0.1:3456/v1/models
-```
-
-### `POST /v1/chat/completions`
-
-OpenAI-compatible chat endpoint.
-
-Minimal request:
-
-```json
-{
-  "model": "claude-sonnet-4",
-  "messages": [
-    { "role": "user", "content": "Hello" }
-  ]
-}
-```
-
-Streaming request:
-
-```json
-{
-  "model": "claude-sonnet-4",
-  "stream": true,
-  "messages": [
-    { "role": "user", "content": "Write a haiku about local proxies." }
-  ]
-}
-```
-
-Extended thinking request:
-
-```json
-{
-  "model": "claude-opus-4",
-  "stream": true,
-  "thinking": {
-    "type": "enabled",
-    "budget_tokens": 10000
-  },
-  "messages": [
-    { "role": "user", "content": "Solve this carefully." }
-  ]
-}
-```
-
-## Logs
-
-The proxy emits structured JSON-style events for request lifecycle and operational behavior.
-
-Common events include:
-
-- `request.start`
-- `request.complete`
-- `request.error`
-- `request.cancel`
-- `queue.enqueue`
-- `queue.drop`
-- `queue.blocked`
-- `queue.timeout`
-- `subprocess.stall`
-- `subprocess.kill`
-- `session.created`
-- `session.invalidate`
-- `session.resume_fail`
-
-Enable extra queue-related visibility with:
-
-```bash
-export CLAUDE_PROXY_DEBUG_QUEUES=true
-```
-
-## File Locations And Persistence
-
-This project writes state into the current user's home directory:
-
-- Session map: `~/.claude-code-cli-sessions.json`
-- Conversation store: `~/.claude-proxy-conversations.db`
-
-What they are used for:
-
-- `~/.claude-code-cli-sessions.json`: maps conversation IDs to Claude CLI session IDs and tracks resume failure counts
-- `~/.claude-proxy-conversations.db`: stores conversation metadata, message history, and request metrics
-
-If you move this project to another machine, the repo alone is not the whole runtime state. The new machine also needs its own Claude CLI login and, if continuity matters, any persisted state you intend to carry over.
+- **Node.js 22+**
+- **npm**
+- **[Claude Code CLI](https://github.com/anthropics/claude-code)** installed globally and authenticated
+- An active **Claude Max** (or equivalent) subscription with access to at least one Claude model
 
 ## Development
 
 ```bash
+git clone https://github.com/mattschwen/claude-max-api-proxy.git
+cd claude-max-api-proxy
 npm install
-npm run build
-npm test
-npm start
+npm run build    # tsc → dist/
+npm test         # runs compiled tests under dist/
+npm start        # dist/server/standalone.js
 ```
 
-## Troubleshooting
+Source lives in `src/`, compiled output in `dist/`. Tests live next to the code they test (`*.test.ts` → `dist/**/*.test.js`). See [CONTRIBUTING.md](./CONTRIBUTING.md) for more.
 
-### `claude: command not found`
+## Security
 
-Install the CLI:
-
-```bash
-npm install -g @anthropic-ai/claude-code
-```
-
-Then verify:
-
-```bash
-claude --version
-```
-
-### `claude auth status` says not logged in
-
-Authenticate:
-
-```bash
-claude auth login
-```
-
-Then re-check:
-
-```bash
-claude auth status
-```
-
-### `/v1/models` returns an empty list
-
-This is the most important operational failure mode to understand.
-
-It means one of these is true:
-
-- Claude CLI is not authenticated
-- the authenticated CLI account cannot access any configured models
-- model probing failed and nothing usable was detected
-
-Check:
-
-```bash
-claude auth status
-curl http://127.0.0.1:3456/health
-curl http://127.0.0.1:3456/v1/models
-```
-
-Look specifically at:
-
-- `auth.loggedIn`
-- `models.available`
-- `models.unavailable`
-
-### Chat requests fail with `model_unavailable`
-
-The client is asking for a recognized model ID that this machine's CLI account cannot currently use.
-
-Fix:
-
-- query `GET /v1/models`
-- choose one of the returned IDs
-- update the client config to use that ID
-
-### OpenClaw is slow or sometimes returns nothing
-
-Check these in order:
-
-1. Confirm the request model is actually listed in `/v1/models`.
-2. Confirm the client is reusing a stable conversation identifier only when it really wants the same conversation.
-3. Check whether a newer same-conversation request is canceling the older one under `latest-wins`.
-4. Enable queue debug logs:
-
-```bash
-export CLAUDE_PROXY_DEBUG_QUEUES=true
-npm start
-```
-
-5. Inspect `/health` for:
-
-- `queues`
-- `subprocesses`
-- `stallDetections`
-- `models.available`
-
-### Sending a second message stops the first one
-
-That is expected under the default policy if both messages belong to the same conversation.
-
-Current default:
-
-```bash
-export CLAUDE_PROXY_SAME_CONVERSATION_POLICY=latest-wins
-```
-
-If you want strict FIFO behavior instead:
-
-```bash
-export CLAUDE_PROXY_SAME_CONVERSATION_POLICY=queue
-```
-
-Then restart the server.
-
-### The port is already in use
-
-Start on another port:
-
-```bash
-node dist/server/standalone.js 8080
-```
-
-Then use:
-
-```text
-http://127.0.0.1:8080/v1
-```
-
-### Streaming looks idle for too long
-
-Check `/health` and logs for stall detection or queue backlog.
-
-Important details:
-
-- Sonnet stall timeout is 90 seconds
-- Opus stall timeout is 120 seconds
-- Haiku stall timeout is 45 seconds
-- extended thinking increases time budgets
-
-If the client disconnects mid-stream, the subprocess is killed immediately by design.
-
-## Auto-Start On macOS
-
-See [docs/macos-setup.md](docs/macos-setup.md).
-
-## Security Notes
-
-- This proxy is designed for local use and binds to `127.0.0.1` by default.
-- It trusts the local machine's Claude CLI login.
-- It does not require a real API key from the client.
-- If you expose it beyond localhost, put proper network controls in front of it.
-- Anyone who can reach the proxy can attempt to use your local Claude CLI session.
-
-## Handoff Checklist For Another Service
-
-1. Install Node.js and npm.
-2. Install Claude Code CLI with `npm install -g @anthropic-ai/claude-code`.
-3. Run `claude auth login` on the target machine.
-4. Verify with `claude auth status`.
-5. Clone this repository.
-6. Run `npm install`.
-7. Run `npm run build`.
-8. Run `npm test`.
-9. Start the server with `npm start`.
-10. Verify `GET /health`.
-11. Verify `GET /v1/models`.
-12. Do not proceed if `/v1/models` is empty.
-13. Configure the downstream client to use `http://127.0.0.1:3456/v1` and any placeholder API key.
-14. Use a model that actually appears in `/v1/models`.
-15. If the client depends on conversation continuity, make sure it sends a stable `user` value.
-16. If same-conversation interruptions are undesirable, set `CLAUDE_PROXY_SAME_CONVERSATION_POLICY=queue` before startup.
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+The proxy binds to `127.0.0.1` by default and trusts the local Claude CLI session. It does **not** authenticate clients — anything that can reach `:3456` can use your Claude Max plan. Don't expose it beyond localhost without putting proper network controls in front of it. See [SECURITY.md](./SECURITY.md) to report vulnerabilities.
 
 ## License
 
-MIT
+[MIT](./LICENSE) © Matt Schwen

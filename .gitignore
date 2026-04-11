@@ -1,7 +1,39 @@
+# Dependencies
 node_modules/
-.claude-flow/
+
+# Build / TS incremental
+*.tsbuildinfo
+
+# Env
 .env
 .env.local
 .env.*.local
-.DS_Store
+
+# Logs
 *.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Coverage
+coverage/
+.nyc_output/
+
+# Caches
+.cache/
+.claude-flow/
+
+# Runtime artifacts
+*.tgz
+*.pid

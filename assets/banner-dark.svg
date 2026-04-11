@@ -1,0 +1,122 @@
+<svg width="1280" height="360" viewBox="0 0 1280 360" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="claude-max-api-proxy banner">
+  <title>claude-max-api-proxy — OpenAI-compatible API, powered by your Claude Max plan</title>
+  <defs>
+    <linearGradient id="bgd" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0b0a12"/>
+      <stop offset="55%" stop-color="#140f1c"/>
+      <stop offset="100%" stop-color="#1a0f1e"/>
+    </linearGradient>
+    <radialGradient id="warmd" cx="15%" cy="50%" r="55%">
+      <stop offset="0%" stop-color="#ff7a3c" stop-opacity="0.22"/>
+      <stop offset="60%" stop-color="#ff7a3c" stop-opacity="0.04"/>
+      <stop offset="100%" stop-color="#ff7a3c" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="sparkd" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffb066"/>
+      <stop offset="45%" stop-color="#ff7a3c"/>
+      <stop offset="100%" stop-color="#d9421d"/>
+    </linearGradient>
+    <linearGradient id="titled" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#f1d9c6"/>
+    </linearGradient>
+    <pattern id="gridd" x="0" y="0" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M 32 0 L 0 0 0 32" fill="none" stroke="#ff7a3c" stroke-opacity="0.05" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <!-- Background -->
+  <rect x="0" y="0" width="1280" height="360" fill="url(#bgd)"/>
+  <rect x="0" y="0" width="1280" height="360" fill="url(#gridd)"/>
+  <rect x="0" y="0" width="1280" height="360" fill="url(#warmd)"/>
+
+  <!-- Bottom accent bar -->
+  <rect x="0" y="356" width="1280" height="4" fill="url(#sparkd)"/>
+
+  <!-- Logo block on the left -->
+  <g transform="translate(80 80)">
+    <rect x="0" y="0" width="200" height="200" rx="40" fill="#15121e"/>
+    <rect x="2" y="2" width="196" height="196" rx="38" fill="none" stroke="#ff7a3c" stroke-opacity="0.32" stroke-width="2"/>
+
+    <!-- brackets -->
+    <path d="M60 66
+             C52 66 46 72 46 80
+             L46 94
+             C46 100 42 104 36 104
+             C42 104 46 108 46 114
+             L46 128
+             C46 136 52 142 60 142"
+          fill="none" stroke="#f5efe7" stroke-opacity="0.92" stroke-width="5"
+          stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M140 66
+             C148 66 154 72 154 80
+             L154 94
+             C154 100 158 104 164 104
+             C158 104 154 108 154 114
+             L154 128
+             C154 136 148 142 140 142"
+          fill="none" stroke="#f5efe7" stroke-opacity="0.92" stroke-width="5"
+          stroke-linecap="round" stroke-linejoin="round"/>
+
+    <!-- spark -->
+    <g transform="translate(100 104)">
+      <path d="M0,-46 L8,-8 L46,0 L8,8 L0,46 L-8,8 L-46,0 L-8,-8 Z" fill="url(#sparkd)"/>
+      <path d="M0,-46 L8,-8 L0,0 L-8,-8 Z" fill="#ffffff" fill-opacity="0.22"/>
+    </g>
+  </g>
+
+  <!-- Wordmark -->
+  <g transform="translate(320 0)">
+    <!-- Tag pill -->
+    <g transform="translate(0 96)">
+      <rect x="0" y="0" width="250" height="30" rx="15" fill="#1e1524" stroke="#ff7a3c" stroke-opacity="0.4" stroke-width="1"/>
+      <circle cx="18" cy="15" r="4" fill="#4ade80"/>
+      <text x="32" y="20" font-family="ui-monospace, 'SF Mono', 'Menlo', 'Monaco', 'Cascadia Mono', monospace" font-size="13" fill="#d9cfc3" letter-spacing="0.6">
+        localhost:3456 · your Claude Max plan
+      </text>
+    </g>
+
+    <!-- Title -->
+    <text x="0" y="180"
+          font-family="ui-sans-serif, -apple-system, 'SF Pro Display', 'Inter', 'Segoe UI', sans-serif"
+          font-size="64"
+          font-weight="800"
+          fill="url(#titled)"
+          letter-spacing="-1.5">
+      claude-max-api-proxy
+    </text>
+
+    <!-- Subtitle -->
+    <text x="2" y="222"
+          font-family="ui-sans-serif, -apple-system, 'SF Pro Display', 'Inter', 'Segoe UI', sans-serif"
+          font-size="22"
+          font-weight="400"
+          fill="#b7a99a">
+      An OpenAI-compatible API server powered by Claude Code CLI.
+    </text>
+
+    <!-- Feature tags -->
+    <g transform="translate(0 256)" font-family="ui-monospace, 'SF Mono', 'Menlo', monospace" font-size="12" fill="#d9cfc3">
+      <g>
+        <rect x="0" y="0" width="132" height="26" rx="6" fill="#1a1422" stroke="#ff7a3c" stroke-opacity="0.22" stroke-width="1"/>
+        <text x="12" y="17">→ /v1/chat/completions</text>
+      </g>
+      <g transform="translate(144 0)">
+        <rect x="0" y="0" width="94" height="26" rx="6" fill="#1a1422" stroke="#ff7a3c" stroke-opacity="0.22" stroke-width="1"/>
+        <text x="12" y="17">⟳ streaming</text>
+      </g>
+      <g transform="translate(250 0)">
+        <rect x="0" y="0" width="118" height="26" rx="6" fill="#1a1422" stroke="#ff7a3c" stroke-opacity="0.22" stroke-width="1"/>
+        <text x="12" y="17">♻ session resume</text>
+      </g>
+      <g transform="translate(380 0)">
+        <rect x="0" y="0" width="96" height="26" rx="6" fill="#1a1422" stroke="#ff7a3c" stroke-opacity="0.22" stroke-width="1"/>
+        <text x="12" y="17">◈ TypeScript</text>
+      </g>
+      <g transform="translate(488 0)">
+        <rect x="0" y="0" width="78" height="26" rx="6" fill="#1a1422" stroke="#ff7a3c" stroke-opacity="0.22" stroke-width="1"/>
+        <text x="12" y="17">⎈ zero-API-key</text>
+      </g>
+    </g>
+  </g>
+</svg>
