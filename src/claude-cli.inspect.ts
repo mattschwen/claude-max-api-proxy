@@ -1,7 +1,11 @@
 import { spawn } from "child_process";
 import { extractTextContent } from "./adapter/cli-to-openai.js";
 import { isAssistantMessage, isResultMessage } from "./types/claude-cli.js";
-import type { ClaudeCliAssistant, ClaudeCliMessage, ClaudeCliResult } from "./types/claude-cli.js";
+import type {
+  ClaudeCliAssistant,
+  ClaudeCliMessage,
+  ClaudeCliResult,
+} from "./types/claude-cli.js";
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 10000;
 const PROBE_PROMPT = "Reply with exactly: OK";
@@ -85,25 +89,39 @@ export function parseAuthStatus(raw: string): ClaudeAuthStatus | null {
   }
 }
 
-function extractAssistantErrorType(messages: ClaudeCliMessage[]): string | undefined {
-  const assistant = messages.find(isAssistantMessage) as ClaudeCliAssistant | undefined;
+function extractAssistantErrorType(
+  messages: ClaudeCliMessage[],
+): string | undefined {
+  const assistant = messages.find(isAssistantMessage) as
+    | ClaudeCliAssistant
+    | undefined;
   return assistant?.error;
 }
 
 function extractAssistantText(messages: ClaudeCliMessage[]): string {
-  const assistant = messages.find(isAssistantMessage) as ClaudeCliAssistant | undefined;
+  const assistant = messages.find(isAssistantMessage) as
+    | ClaudeCliAssistant
+    | undefined;
   if (!assistant) return "";
   return extractTextContent(assistant);
 }
 
 function looksLikeCliError(message: string): boolean {
-  return /issue with the selected model|not authenticated|auth login|authentication|rate limit|budget|permission denied|invalid request/i.test(message);
+  return /issue with the selected model|not authenticated|auth login|authentication|rate limit|budget|permission denied|invalid request/i.test(
+    message,
+  );
 }
 
-export function classifyClaudeError(message: string, rawType?: string): ClaudeProxyError {
+export function classifyClaudeError(
+  message: string,
+  rawType?: string,
+): ClaudeProxyError {
   const normalized = message.trim() || "Claude CLI request failed";
   const lower = normalized.toLowerCase();
-  const isModelError = /selected model|may not exist|do not have access|don't have access/i.test(normalized);
+  const isModelError =
+    /selected model|may not exist|do not have access|don't have access/i.test(
+      normalized,
+    );
 
   if (isModelError) {
     return {
@@ -115,7 +133,11 @@ export function classifyClaudeError(message: string, rawType?: string): ClaudePr
     };
   }
 
-  if (/not authenticated|auth login|authentication|logged out|oauth|token/i.test(lower)) {
+  if (
+    /not authenticated|auth login|authentication|logged out|oauth|token/i.test(
+      lower,
+    )
+  ) {
     return {
       status: 401,
       type: "authentication_error",
@@ -154,13 +176,19 @@ export function classifyClaudeError(message: string, rawType?: string): ClaudePr
   };
 }
 
-export function extractClaudeErrorFromMessages(messages: ClaudeCliMessage[]): ClaudeProxyError | null {
+export function extractClaudeErrorFromMessages(
+  messages: ClaudeCliMessage[],
+): ClaudeProxyError | null {
   const result = messages.find(isResultMessage) as ClaudeCliResult | undefined;
   const assistantMessage = extractAssistantText(messages);
   const assistantError = extractAssistantErrorType(messages);
 
   if (result) {
-    return extractClaudeErrorFromResult(result, assistantMessage, assistantError);
+    return extractClaudeErrorFromResult(
+      result,
+      assistantMessage,
+      assistantError,
+    );
   }
 
   if (assistantError || looksLikeCliError(assistantMessage)) {
@@ -176,13 +204,19 @@ export function extractClaudeErrorFromResult(
   assistantError?: string,
 ): ClaudeProxyError | null {
   const message = (assistantText || result.result || "").trim();
-  if (!result.is_error && result.subtype !== "error" && !assistantError && !looksLikeCliError(message)) {
+  if (!result.is_error && result.subtype !== "error" && !assistantError) {
     return null;
   }
-  return classifyClaudeError(message || "Claude CLI request failed", assistantError);
+  return classifyClaudeError(
+    message || "Claude CLI request failed",
+    assistantError,
+  );
 }
 
-export async function runClaudeCommand(args: string[], timeoutMs = DEFAULT_COMMAND_TIMEOUT_MS): Promise<ClaudeCommandResult> {
+export async function runClaudeCommand(
+  args: string[],
+  timeoutMs = DEFAULT_COMMAND_TIMEOUT_MS,
+): Promise<ClaudeCommandResult> {
   return new Promise<ClaudeCommandResult>((resolve) => {
     const proc = spawn("claude", args, {
       stdio: ["ignore", "pipe", "pipe"],
@@ -222,18 +256,27 @@ export async function runClaudeCommand(args: string[], timeoutMs = DEFAULT_COMMA
   });
 }
 
-export async function verifyClaude(): Promise<{ ok: boolean; error?: string; version?: string }> {
+export async function verifyClaude(): Promise<{
+  ok: boolean;
+  error?: string;
+  version?: string;
+}> {
   const result = await runClaudeCommand(["--version"], 5000);
   if (result.code === 0) {
     return { ok: true, version: result.stdout.trim() };
   }
   return {
     ok: false,
-    error: "Claude CLI not found. Install with: npm install -g @anthropic-ai/claude-code",
+    error:
+      "Claude CLI not found. Install with: npm install -g @anthropic-ai/claude-code",
   };
 }
 
-export async function verifyAuth(): Promise<{ ok: boolean; error?: string; status?: ClaudeAuthStatus }> {
+export async function verifyAuth(): Promise<{
+  ok: boolean;
+  error?: string;
+  status?: ClaudeAuthStatus;
+}> {
   const result = await runClaudeCommand(["auth", "status"], 5000);
   const raw = result.stdout.trim() || result.stderr.trim();
   const status = parseAuthStatus(raw);
@@ -264,15 +307,13 @@ export async function verifyAuth(): Promise<{ ok: boolean; error?: string; statu
 // leaving /health.models.available empty even though the underlying CLI is
 // perfectly healthy. 60s gives real-world probes plenty of headroom while
 // still bounding worst-case startup latency.
-export async function probeModelAvailability(model: string): Promise<ModelProbeResult> {
-  const result = await runClaudeCommand([
-    "--print",
-    "--output-format",
-    "json",
-    "--model",
-    model,
-    PROBE_PROMPT,
-  ], 60000);
+export async function probeModelAvailability(
+  model: string,
+): Promise<ModelProbeResult> {
+  const result = await runClaudeCommand(
+    ["--print", "--output-format", "json", "--model", model, PROBE_PROMPT],
+    60000,
+  );
 
   const messages = parseClaudeJsonOutput(result.stdout);
   const error = extractClaudeErrorFromMessages(messages);
@@ -281,14 +322,25 @@ export async function probeModelAvailability(model: string): Promise<ModelProbeR
   }
 
   const initMessage = messages.find(
-    (message): message is Extract<ClaudeCliMessage, { type: "system"; subtype: "init" }> =>
-      message.type === "system" && message.subtype === "init",
+    (
+      message,
+    ): message is Extract<
+      ClaudeCliMessage,
+      { type: "system"; subtype: "init" }
+    > => message.type === "system" && message.subtype === "init",
   );
 
   return {
     ok: result.code === 0,
     model,
     resolvedModel: initMessage?.model,
-    error: result.code === 0 ? undefined : classifyClaudeError(result.stderr.trim() || result.stdout.trim() || `Claude CLI exited with code ${result.code}`),
+    error:
+      result.code === 0
+        ? undefined
+        : classifyClaudeError(
+            result.stderr.trim() ||
+              result.stdout.trim() ||
+              `Claude CLI exited with code ${result.code}`,
+          ),
   };
 }

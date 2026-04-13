@@ -1,0 +1,19 @@
+services:
+  claude-max-proxy:
+    build: .
+    container_name: claude-max-proxy
+    restart: unless-stopped
+    environment:
+      HOME: /home/node
+      DB_PATH: /data/conversations.db
+      SESSION_FILE: /data/sessions.json
+    volumes:
+      - ${CLAUDE_CONFIG_DIR:-${HOME}/.claude}:/home/node/.claude:ro
+      - ${CLAUDE_CONFIG_FILE:-${HOME}/.claude.json}:/home/node/.claude.json:ro
+      - ${REPOS_DIR:-/opt/repos}:/opt/repos
+      - claude-max-proxy-data:/data
+    ports:
+      - "${PORT:-3456}:3456"
+
+volumes:
+  claude-max-proxy-data:

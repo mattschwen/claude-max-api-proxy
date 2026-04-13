@@ -13,7 +13,9 @@ import fsSync from "fs";
 import path from "path";
 import { log } from "../logger.js";
 
-const SESSION_FILE = path.join(process.env.HOME || "/tmp", ".claude-code-cli-sessions.json");
+const SESSION_FILE =
+  process.env.SESSION_FILE ||
+  path.join(process.env.HOME || "/tmp", ".claude-code-cli-sessions.json");
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_TASKS_PER_SESSION = 50;
 const MAX_RESUME_FAILURES = 2;
@@ -83,19 +85,26 @@ class SessionManager {
    * Get or create a Claude session ID for a Clawdbot conversation.
    * Returns { sessionId, isResume } so callers know whether to use --resume.
    */
-  getOrCreate(clawdbotId: string, model = "sonnet"): { sessionId: string; isResume: boolean } {
+  getOrCreate(
+    clawdbotId: string,
+    model = "sonnet",
+  ): { sessionId: string; isResume: boolean } {
     const existing = this.sessions.get(clawdbotId);
     if (existing) {
       const ageMs = Date.now() - existing.lastUsedAt;
       const MAX_RESUME_AGE_MS = 6 * 60 * 60 * 1000;
 
       if (ageMs > MAX_RESUME_AGE_MS) {
-        console.log(`[SessionManager] Session ${clawdbotId} stale (${Math.round(ageMs / 3600000)}h), creating fresh`);
+        console.log(
+          `[SessionManager] Session ${clawdbotId} stale (${Math.round(ageMs / 3600000)}h), creating fresh`,
+        );
         this.sessions.delete(clawdbotId);
       } else {
         existing.taskCount = (existing.taskCount || 0) + 1;
         if (existing.taskCount > MAX_TASKS_PER_SESSION) {
-          console.log(`[SessionManager] Session ${clawdbotId} hit task limit (${existing.taskCount}), resetting`);
+          console.log(
+            `[SessionManager] Session ${clawdbotId} hit task limit (${existing.taskCount}), resetting`,
+          );
           this.sessions.delete(clawdbotId);
         } else {
           existing.lastUsedAt = Date.now();
@@ -117,7 +126,10 @@ class SessionManager {
       resumeFailures: 0,
     };
     this.sessions.set(clawdbotId, mapping);
-    log("session.created", { conversationId: clawdbotId, sessionId: claudeSessionId.slice(0, 8) });
+    log("session.created", {
+      conversationId: clawdbotId,
+      sessionId: claudeSessionId.slice(0, 8),
+    });
     this.scheduleSave();
     return { sessionId: claudeSessionId, isResume: false };
   }
@@ -224,8 +236,13 @@ class SessionManager {
 
 export const sessionManager = new SessionManager();
 
-sessionManager.load().catch((err) => console.error("[SessionManager] Load error:", err));
+sessionManager
+  .load()
+  .catch((err) => console.error("[SessionManager] Load error:", err));
 
-setInterval(() => {
-  sessionManager.cleanup();
-}, 60 * 60 * 1000);
+setInterval(
+  () => {
+    sessionManager.cleanup();
+  },
+  60 * 60 * 1000,
+);

@@ -59,18 +59,27 @@ async function main(): Promise<void> {
     if (availability.unavailable[0]) {
       console.warn(`  Reason: ${availability.unavailable[0].error.message}`);
     }
-    console.warn("  The server will start, but /v1/models will be empty and chat requests will fail until model access is restored.\n");
+    console.warn(
+      "  The server will start, but /v1/models will be empty and chat requests will fail until model access is restored.\n",
+    );
   } else {
-    console.log(`  Models: ${availability.available.map((model) => model.id).join(", ")}\n`);
+    console.log(
+      `  Models: ${availability.available.map((model) => model.id).join(", ")}\n`,
+    );
   }
 
   try {
-    await startServer({ port });
+    const host = process.env.HOST || "0.0.0.0";
+    await startServer({ port, host });
     log("server.start", { port });
     console.log("\nServer ready. Test with:");
-    console.log(`  curl -X POST http://localhost:${port}/v1/chat/completions \\`);
+    console.log(
+      `  curl -X POST http://localhost:${port}/v1/chat/completions \\`,
+    );
     console.log(`    -H "Content-Type: application/json" \\`);
-    console.log(`    -d '{"model": "claude-sonnet-4", "messages": [{"role": "user", "content": "Hello!"}]}'`);
+    console.log(
+      `    -d '{"model": "claude-sonnet-4", "messages": [{"role": "user", "content": "Hello!"}]}'`,
+    );
     console.log("\nPress Ctrl+C to stop.\n");
   } catch (err) {
     console.error("Failed to start server:", err);
@@ -84,7 +93,9 @@ async function main(): Promise<void> {
     shuttingDown = true;
 
     log("server.shutdown", { signal });
-    console.log(`\n[Shutdown] Received ${signal}, starting graceful shutdown...`);
+    console.log(
+      `\n[Shutdown] Received ${signal}, starting graceful shutdown...`,
+    );
 
     // 1. Stop accepting new connections
     const server = getServer();
@@ -97,7 +108,9 @@ async function main(): Promise<void> {
     // 2. Wait for in-flight requests (grace period)
     const activeCount = subprocessRegistry.size;
     if (activeCount > 0) {
-      console.log(`[Shutdown] Waiting up to ${SHUTDOWN_GRACE_MS / 1000}s for ${activeCount} in-flight requests...`);
+      console.log(
+        `[Shutdown] Waiting up to ${SHUTDOWN_GRACE_MS / 1000}s for ${activeCount} in-flight requests...`,
+      );
       await new Promise<void>((resolve) => {
         const checkInterval = setInterval(() => {
           if (subprocessRegistry.size === 0) {
@@ -110,7 +123,9 @@ async function main(): Promise<void> {
         setTimeout(() => {
           clearInterval(checkInterval);
           if (subprocessRegistry.size > 0) {
-            console.log(`[Shutdown] Grace period expired, ${subprocessRegistry.size} requests still active`);
+            console.log(
+              `[Shutdown] Grace period expired, ${subprocessRegistry.size} requests still active`,
+            );
           }
           resolve();
         }, SHUTDOWN_GRACE_MS);
@@ -119,7 +134,9 @@ async function main(): Promise<void> {
 
     // 3. Kill remaining subprocesses
     if (subprocessRegistry.size > 0) {
-      console.log(`[Shutdown] Killing ${subprocessRegistry.size} remaining subprocesses`);
+      console.log(
+        `[Shutdown] Killing ${subprocessRegistry.size} remaining subprocesses`,
+      );
       subprocessRegistry.killAll();
     }
 
@@ -132,7 +149,9 @@ async function main(): Promise<void> {
     // 5. Stop server and exit
     try {
       await stopServer();
-    } catch { /* already closing */ }
+    } catch {
+      /* already closing */
+    }
 
     console.log("[Shutdown] Goodbye");
     process.exit(0);
