@@ -50,22 +50,13 @@ import { runtimeConfig } from "../config.js";
 // Thinking budget resolution
 // ---------------------------------------------------------------------------
 
-// Label → token-budget mapping. Labels mirror OpenClaw's /think choices so
-// clients can pass the same string they use there. Token values align with
-// Claude CLI's --effort levels (low, medium, high, max). "adaptive" and "off"
-// both mean "do not pass --effort to the CLI" (Claude's adaptive default).
-//
-// Aliases:
-//   xhigh -> max (Claude tops out at --effort max; OpenClaw's xhigh is GPT-only)
-//   minimal -> low (no CLI level below low)
+// Label → token-budget mapping. Labels match Claude CLI's --effort levels
+// (low, medium, high, max). "off" disables extended thinking (no --effort flag).
 const REASONING_EFFORT_MAP: Record<string, number> = {
   off: 0,
-  adaptive: 0,
-  minimal: 5000,
   low: 5000,
   medium: 10000,
   high: 32000,
-  xhigh: 64000,
   max: 64000,
 };
 
