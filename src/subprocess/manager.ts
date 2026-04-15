@@ -96,7 +96,7 @@ export const subprocessRegistry = new SubprocessRegistry();
  * The CLI no longer accepts a raw token count; only level names.
  *
  * Thresholds chosen to line up with the REASONING_EFFORT_MAP in routes.ts:
- *   minimal = 1024, low = 5000, medium = 10000, high = 32000
+ *   low = 5000, medium = 10000, high = 32000, max > 32000
  */
 function thinkingBudgetToEffort(budget: number): string | undefined {
   if (!Number.isFinite(budget) || budget <= 0) return undefined;

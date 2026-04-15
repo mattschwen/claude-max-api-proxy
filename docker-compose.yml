@@ -3,8 +3,10 @@ services:
     build: .
     container_name: claude-max-proxy
     restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
     environment:
       HOME: /home/node
+      HOST: 0.0.0.0
       DB_PATH: /data/conversations.db
       SESSION_FILE: /data/sessions.json
     volumes:

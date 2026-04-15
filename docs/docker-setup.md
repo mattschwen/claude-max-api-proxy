@@ -34,6 +34,7 @@ All settings go in `.env`. See `.env.example` for defaults.
 | `CLAUDE_CONFIG_FILE`      | `~/.claude.json` | Path to your Claude CLI config file                                                                                    |
 | `PUID`                    | `1000`           | User ID the container process runs as                                                                                  |
 | `PGID`                    | `1000`           | Group ID the container process runs as                                                                                 |
+| `CLAUDE_PROXY_ENABLE_ADMIN_API` | `false`    | Enable the mutable `/admin/thinking-budget` endpoint                                                                   |
 | `DEFAULT_THINKING_BUDGET` | _(unset)_        | Default extended-thinking budget when the client does not send one. See [Extended Thinking](#extended-thinking) below. |
 
 ### File permissions
@@ -94,11 +95,11 @@ Then use `http://claude-max-proxy:3456/v1` as the base URL from your service.
 The proxy enables Claude's extended thinking when any of these sources provide a budget, checked in this order:
 
 1. Request body `thinking.budget_tokens` — Anthropic style.
-2. Request body `reasoning_effort` — OpenAI style. Values: `minimal`, `low`, `medium`, `high`.
+2. Request body `reasoning_effort` — OpenAI style. Values: `off`, `low`, `medium`, `high`, `max`.
 3. Request header `X-Thinking-Budget` — accepts an integer (tokens) or one of the effort labels.
 4. Environment variable `DEFAULT_THINKING_BUDGET` — server-wide default.
 
-Effort labels map to token budgets: `minimal` = 1024, `low` = 5000, `medium` = 10000, `high` = 32000.
+Effort labels map to token budgets: `off` = disabled, `low` = 5000, `medium` = 10000, `high` = 32000, `max` = 64000.
 
 ### When to use `DEFAULT_THINKING_BUDGET`
 
@@ -109,6 +110,16 @@ DEFAULT_THINKING_BUDGET=high
 ```
 
 Per-request overrides from any of the sources above take priority.
+
+### Optional admin endpoint
+
+If your client cannot send `reasoning_effort` or `X-Thinking-Budget`, you can opt into a mutable runtime default:
+
+```bash
+CLAUDE_PROXY_ENABLE_ADMIN_API=true docker compose up -d
+```
+
+That mounts `GET/POST/PUT /admin/thinking-budget`. Leave it disabled unless you trust every client that can reach the proxy.
 
 ### Per-request examples
 
@@ -154,4 +165,4 @@ docker compose logs -f
 
 ## Security
 
-The proxy does not authenticate clients. Any container or process that can reach port 3456 can use your Claude Max plan. Only expose it on trusted networks.
+The proxy does not authenticate clients. Any container or process that can reach port 3456 can use your Claude Max plan. Only expose it on trusted networks, and leave `CLAUDE_PROXY_ENABLE_ADMIN_API` off unless you explicitly need it.

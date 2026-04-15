@@ -29,7 +29,8 @@ curl http://127.0.0.1:3456/health
 
   "config": {
     "sameConversationPolicy": "latest-wins", // or "queue"
-    "debugQueues": false
+    "debugQueues": false,
+    "enableAdminApi": false
   },
 
   "auth": {
@@ -196,7 +197,14 @@ Response is a Server-Sent Events stream of OpenAI-shaped `chat.completion.chunk`
 
 ### Extended thinking
 
-Opus models support extended thinking via the standard `thinking` field:
+Opus models support extended thinking through any of these inputs:
+
+- request body `thinking.budget_tokens`
+- request body `reasoning_effort`
+- request header `X-Thinking-Budget`
+- server default `DEFAULT_THINKING_BUDGET`
+
+Example using the standard `thinking` field:
 
 ```json
 {
@@ -209,7 +217,7 @@ Opus models support extended thinking via the standard `thinking` field:
 }
 ```
 
-When `thinking.type === "enabled"`, the proxy multiplies the family's hard timeout by 3× to allow for longer reasoning windows.
+When any thinking budget source is active, the proxy multiplies the family's hard timeout by 3× to allow for longer reasoning windows.
 
 ### Conversation continuity — the `user` field
 

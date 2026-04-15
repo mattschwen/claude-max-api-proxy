@@ -69,7 +69,7 @@ async function main(): Promise<void> {
   }
 
   try {
-    const host = process.env.HOST || "0.0.0.0";
+    const host = process.env.HOST || "127.0.0.1";
     await startServer({ port, host });
     log("server.start", { port });
     console.log("\nServer ready. Test with:");

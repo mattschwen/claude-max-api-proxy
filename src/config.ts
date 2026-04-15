@@ -24,6 +24,7 @@ export function parseSameConversationPolicy(
 export interface ProxyRuntimeConfig {
   sameConversationPolicy: SameConversationPolicy;
   debugQueues: boolean;
+  enableAdminApi: boolean;
   defaultThinkingBudget: string | undefined;
 }
 
@@ -65,17 +66,18 @@ export function persistRuntimeState(): void {
 
 export function readRuntimeConfig(
   env: NodeJS.ProcessEnv = process.env,
+  persistedDefault = readPersistedThinkingBudget(),
 ): ProxyRuntimeConfig {
   // Persisted admin overrides win over the env var default so changes made
   // via /admin/thinking-budget survive restarts.
-  const persisted = readPersistedThinkingBudget();
   const envDefault = env.DEFAULT_THINKING_BUDGET?.trim() || undefined;
   return {
     sameConversationPolicy: parseSameConversationPolicy(
       env.CLAUDE_PROXY_SAME_CONVERSATION_POLICY,
     ),
     debugQueues: parseBoolean(env.CLAUDE_PROXY_DEBUG_QUEUES, false),
-    defaultThinkingBudget: persisted ?? envDefault,
+    enableAdminApi: parseBoolean(env.CLAUDE_PROXY_ENABLE_ADMIN_API, false),
+    defaultThinkingBudget: persistedDefault ?? envDefault,
   };
 }
 

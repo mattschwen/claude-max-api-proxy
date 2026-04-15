@@ -197,6 +197,9 @@ export CLAUDE_PROXY_SAME_CONVERSATION_POLICY=queue
 # Extra visibility into queue internals
 export CLAUDE_PROXY_DEBUG_QUEUES=true
 
+# Optional: enable the runtime thinking-budget admin endpoint
+# export CLAUDE_PROXY_ENABLE_ADMIN_API=true
+
 npm start
 ```
 
@@ -252,7 +255,7 @@ Source lives in `src/`, compiled output in `dist/` (gitignored). Tests live next
 
 ## Security
 
-The proxy binds to `127.0.0.1` by default and trusts the local Claude CLI session. It does **not** authenticate clients — anything that can reach `:3456` can use your Claude Max plan. Don't expose it beyond localhost without putting proper network controls in front of it. See [SECURITY.md](./SECURITY.md) to report vulnerabilities.
+The proxy binds to `127.0.0.1` by default and trusts the local Claude CLI session. It does **not** authenticate clients — anything that can reach `:3456` can use your Claude Max plan. Don't expose it beyond localhost without putting proper network controls in front of it, and keep the optional admin API disabled unless you intentionally need it. See [SECURITY.md](./SECURITY.md) to report vulnerabilities.
 
 ## License
 

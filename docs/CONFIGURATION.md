@@ -8,6 +8,9 @@ All runtime configuration is driven by environment variables. Set them **before*
 | --- | --- | --- | --- |
 | `CLAUDE_PROXY_SAME_CONVERSATION_POLICY` | `latest-wins` | `latest-wins`, `queue` | How concurrent requests for the same conversation are handled. |
 | `CLAUDE_PROXY_DEBUG_QUEUES` | `false` | `true`, `false` | Emit extra structured log events for queue enqueue/drop/block/cancel. |
+| `CLAUDE_PROXY_ENABLE_ADMIN_API` | `false` | `true`, `false` | Mount `GET/POST/PUT /admin/thinking-budget` for live default-thinking changes. |
+| `DEFAULT_THINKING_BUDGET` | _(unset)_ | integer, `off`, `low`, `medium`, `high`, `max` | Server-wide fallback thinking budget when the client does not send one. |
+| `HOST` | `127.0.0.1` | bind address | Network interface used by the standalone server. |
 | `PORT` (positional arg) | `3456` | any free port | Pass as `node dist/server/standalone.js <port>`. |
 
 ## Same-conversation policy
@@ -49,22 +52,39 @@ export CLAUDE_PROXY_DEBUG_QUEUES=true
 npm start
 ```
 
-## Custom port
+## Admin API
 
-The server binds to `127.0.0.1:3456` by default. Pass a port as the first positional argument to the standalone server to change it:
+The mutable thinking-budget admin API is disabled by default:
 
 ```bash
-node dist/server/standalone.js 8080
+export CLAUDE_PROXY_ENABLE_ADMIN_API=true
+npm start
 ```
 
-Then point clients at `http://127.0.0.1:8080/v1`.
+When enabled, these endpoints are mounted:
+
+- `GET /admin/thinking-budget`
+- `POST /admin/thinking-budget`
+- `PUT /admin/thinking-budget`
+
+This endpoint changes server behavior at runtime, persists its override across restarts, and the proxy does not authenticate clients, so only enable it on trusted networks.
+
+## Network binding
+
+The standalone server binds to `127.0.0.1:3456` by default. Pass a port as the first positional argument to change the port, or set `HOST` to change the bind address:
+
+```bash
+HOST=0.0.0.0 node dist/server/standalone.js 8080
+```
+
+Then point clients at `http://127.0.0.1:8080/v1` for localhost use, or your chosen host/IP when deliberately exposing it.
 
 > [!NOTE]
-> The server binds to `127.0.0.1` explicitly. To expose it beyond localhost, put your own reverse proxy (nginx, Caddy, Tailscale serve) in front of it rather than modifying the bind.
+> The safest default is to keep the server on `127.0.0.1`. If you set `HOST=0.0.0.0`, treat the proxy like an internal service and put network controls in front of it.
 
 ## Timeouts
 
-Timeouts are hard-coded per model family in `src/config.ts`. They're deliberately not environment-configurable today.
+Timeouts are hard-coded per model family in `src/models.ts`. They're deliberately not environment-configurable today.
 
 ### Stall timeouts
 
@@ -86,7 +106,7 @@ Absolute wall-clock ceiling per request, regardless of activity.
 | Sonnet | 10 min |
 | Haiku | 2 min |
 
-If `thinking.type === "enabled"` on the request, the hard timeout is multiplied by **3×** to allow for longer reasoning windows.
+If any thinking budget source is active on the request (`thinking.budget_tokens`, `reasoning_effort`, `X-Thinking-Budget`, or `DEFAULT_THINKING_BUDGET`), the hard timeout is multiplied by **3×** to allow for longer reasoning windows.
 
 ### Kill escalation
 
@@ -94,12 +114,13 @@ When a subprocess needs to die (stall, client disconnect, shutdown, timeout), th
 
 ## Persistent state
 
-The proxy writes two files under the user's home directory:
+The proxy writes these machine-local state files:
 
 | Path | Purpose |
 | --- | --- |
 | `~/.claude-code-cli-sessions.json` | Maps conversation IDs → Claude CLI session IDs, tracks resume failure counts. |
 | `~/.claude-proxy-conversations.db` | SQLite conversation metadata, message history, request metrics. |
+| `dirname(DB_PATH)/runtime-state.json` | Persists the admin-set default thinking budget when `CLAUDE_PROXY_ENABLE_ADMIN_API=true`. |
 
 These files are **machine-local** and not portable. Moving the repo to another machine does not carry conversation continuity.
 
