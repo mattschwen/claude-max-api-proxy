@@ -53,12 +53,14 @@ export { isAuthError, withAuthRetry } from "./auth-retry.js";
 // ---------------------------------------------------------------------------
 
 // Label → token-budget mapping. Labels match Claude CLI's --effort levels
-// (low, medium, high, max). "off" disables extended thinking (no --effort flag).
+// (low, medium, high, xhigh, max). "off" disables extended thinking (no --effort flag).
+// xhigh was added with Claude Opus 4.7 as an intermediate tier between high and max.
 const REASONING_EFFORT_MAP: Record<string, number> = {
   off: 0,
   low: 5000,
   medium: 10000,
   high: 32000,
+  xhigh: 48000,
   max: 64000,
 };
 
