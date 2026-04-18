@@ -167,6 +167,7 @@ const claudeCodeCliPlugin = {
                   `OpenAI-compatible API running at http://127.0.0.1:${serverPort}/v1`,
                   `Available models: ${availability.available.map((model) => model.id).join(", ")}`,
                   `Same-conversation policy: ${runtimeConfig.sameConversationPolicy}`,
+                  "Built-in expert coding agent available at /v1/agents/expert-coder.",
                   "Keep the server running to use this provider.",
                 ],
               };

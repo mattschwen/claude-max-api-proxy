@@ -32,7 +32,12 @@ import { extractTextContent } from "../adapter/cli-to-openai.js";
 import { sessionManager } from "../session/manager.js";
 import { conversationStore } from "../store/conversation.js";
 import { subprocessPool } from "../subprocess/pool.js";
-import { getModelTimeout, getStallTimeout, isValidModel } from "../models.js";
+import {
+  getModelTimeout,
+  getStallTimeout,
+  isValidModel,
+  supportsAdaptiveReasoningModel,
+} from "../models.js";
 import { log, logError } from "../logger.js";
 import { modelAvailability } from "../model-availability.js";
 import {
@@ -46,77 +51,75 @@ import type {
 } from "../types/claude-cli.js";
 import { runtimeConfig, persistRuntimeState } from "../config.js";
 import { isAuthError, withAuthRetry } from "./auth-retry.js";
+import {
+  chatToResponsesResponse,
+  responsesToChatRequest,
+} from "../adapter/responses.js";
+import {
+  applyAgentProfile,
+  getBuiltinAgent,
+  listBuiltinAgents,
+} from "../agents.js";
+import type { OpenAIChatRequest, OpenAIChatResponse } from "../types/openai.js";
+import type { OpenAIResponsesRequest } from "../types/responses.js";
+import {
+  REASONING_EFFORT_MAP,
+  parseEffortOrTokens,
+  resolveReasoningConfig,
+} from "../reasoning.js";
 export { isAuthError, withAuthRetry } from "./auth-retry.js";
 
 // ---------------------------------------------------------------------------
-// Thinking budget resolution
+// Responses API compatibility
 // ---------------------------------------------------------------------------
 
-// Label → token-budget mapping. Labels match Claude CLI's --effort levels
-// (low, medium, high, xhigh, max). "off" disables extended thinking (no --effort flag).
-// xhigh is an intermediate tier between high and max on supported Claude CLIs.
-const REASONING_EFFORT_MAP: Record<string, number> = {
-  off: 0,
-  low: 5000,
-  medium: 10000,
-  high: 32000,
-  xhigh: 48000,
-  max: 64000,
-};
+const RESPONSE_CONVERSATION_TTL_MS = 24 * 60 * 60 * 1000;
+const responseConversationMap = new Map<
+  string,
+  { conversationId: string; createdAt: number }
+>();
 
-function parseEffortOrTokens(raw: string): number | undefined {
-  const trimmed = raw.trim();
-  if (!trimmed) return undefined;
-  const lower = trimmed.toLowerCase();
-  if (lower in REASONING_EFFORT_MAP) return REASONING_EFFORT_MAP[lower];
-  const parsed = parseInt(trimmed, 10);
-  if (Number.isFinite(parsed) && parsed >= 0) return parsed;
-  return undefined;
+function rememberResponseConversation(
+  responseId: string,
+  conversationId: string,
+): void {
+  responseConversationMap.set(responseId, {
+    conversationId,
+    createdAt: Date.now(),
+  });
 }
 
-/**
- * Resolve thinking budget from multiple sources in priority order:
- *   1. Request body `thinking.budget_tokens` (Anthropic style — explicit)
- *   2. Request body `reasoning_effort` (OpenAI style — "off" | "low" | "medium" | "high" | "xhigh" | "max")
- *   3. Request header `X-Thinking-Budget` (simple client override)
- *   4. Environment variable `DEFAULT_THINKING_BUDGET` (server default)
- *
- * Returns `undefined` when no source provides a value (thinking stays off).
- */
-function resolveThinkingBudget(
-  req: Request,
-  body: Record<string, unknown>,
-): number | undefined {
-  const thinking = body.thinking as
-    | { type?: string; budget_tokens?: number }
-    | undefined;
-  if (
-    thinking?.type === "enabled" &&
-    typeof thinking.budget_tokens === "number" &&
-    thinking.budget_tokens > 0
-  ) {
-    return thinking.budget_tokens;
-  }
+function getConversationIdForResponse(
+  previousResponseId: string | undefined,
+): string | undefined {
+  if (!previousResponseId) return undefined;
+  const entry = responseConversationMap.get(previousResponseId);
+  if (!entry) return undefined;
+  return entry.conversationId;
+}
 
-  const effort = body.reasoning_effort;
-  if (typeof effort === "string") {
-    const value = parseEffortOrTokens(effort);
-    if (value !== undefined) return value > 0 ? value : undefined;
+const responseConversationCleanup = setInterval(() => {
+  const cutoff = Date.now() - RESPONSE_CONVERSATION_TTL_MS;
+  for (const [responseId, entry] of responseConversationMap) {
+    if (entry.createdAt < cutoff) {
+      responseConversationMap.delete(responseId);
+    }
   }
+}, 60 * 60 * 1000);
+if (typeof responseConversationCleanup.unref === "function") {
+  responseConversationCleanup.unref();
+}
 
-  const headerVal = req.header("x-thinking-budget");
-  if (headerVal) {
-    const value = parseEffortOrTokens(headerVal);
-    if (value !== undefined) return value > 0 ? value : undefined;
-  }
+// ---------------------------------------------------------------------------
+// Thinking / reasoning helpers
+// ---------------------------------------------------------------------------
 
-  const runtimeDefault = runtimeConfig.defaultThinkingBudget;
-  if (runtimeDefault) {
-    const value = parseEffortOrTokens(runtimeDefault);
-    if (value !== undefined) return value > 0 ? value : undefined;
-  }
-
-  return undefined;
+function hasActiveReasoning(cliInput: CliInput): boolean {
+  return Boolean(
+    cliInput.thinkingBudget ||
+      cliInput.thinkingEffort ||
+      cliInput.reasoningMode === "adaptive",
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -473,14 +476,13 @@ export async function handleChatCompletions(
   res: Response,
 ): Promise<void> {
   const requestId = uuidv4().replace(/-/g, "").slice(0, 24);
-  const body = req.body as Record<string, unknown>;
-  const stream = body.stream === true;
-  const requestedModel = body.model ? String(body.model) : undefined;
-
+  const requestedAgentId =
+    typeof req.params?.agentId === "string" ? req.params.agentId : undefined;
+  const rawBody = (req.body ?? {}) as OpenAIChatRequest & Record<string, unknown>;
   if (
-    !body.messages ||
-    !Array.isArray(body.messages) ||
-    body.messages.length === 0
+    !rawBody.messages ||
+    !Array.isArray(rawBody.messages) ||
+    rawBody.messages.length === 0
   ) {
     res.status(400).json({
       error: {
@@ -491,6 +493,37 @@ export async function handleChatCompletions(
     });
     return;
   }
+
+  const bodyAgentId =
+    typeof rawBody.agent === "string" && rawBody.agent.trim()
+      ? rawBody.agent.trim()
+      : undefined;
+  const unknownAgentId =
+    (requestedAgentId && !getBuiltinAgent(requestedAgentId)
+      ? requestedAgentId
+      : undefined) ||
+    (bodyAgentId && !getBuiltinAgent(bodyAgentId) ? bodyAgentId : undefined) ||
+    (runtimeConfig.defaultAgent && !getBuiltinAgent(runtimeConfig.defaultAgent)
+      ? runtimeConfig.defaultAgent
+      : undefined);
+  if (unknownAgentId) {
+    res.status(400).json({
+      error: {
+        message: `Unknown agent '${unknownAgentId}'. Use GET /v1/agents to see the built-in agent catalog.`,
+        type: "invalid_request_error",
+        code: "agent_not_found",
+      },
+    });
+    return;
+  }
+
+  const { request: effectiveRequest, agent } = applyAgentProfile(rawBody, {
+    explicitAgentId: requestedAgentId,
+    defaultAgentId: runtimeConfig.defaultAgent,
+  });
+  const body = effectiveRequest as OpenAIChatRequest & Record<string, unknown>;
+  const stream = body.stream === true;
+  const requestedModel = body.model ? String(body.model) : undefined;
 
   if (requestedModel && !isValidModel(requestedModel)) {
     res.status(400).json({
@@ -530,6 +563,23 @@ export async function handleChatCompletions(
     return;
   }
 
+  const reasoning = resolveReasoningConfig({
+    body,
+    headerBudget: req.header("x-thinking-budget") || undefined,
+    runtimeDefault: runtimeConfig.defaultThinkingBudget,
+    resolvedModel: resolvedModel.id,
+    cliVersion: availability.cli?.version,
+  });
+  if (reasoning.requiresCliUpgrade) {
+    sendJsonError(res, {
+      status: 400,
+      type: "invalid_request_error",
+      code: "adaptive_reasoning_requires_cli_upgrade",
+      message: `Model '${resolvedModel.id}' expects adaptive reasoning, but the installed Claude CLI (${availability.cli?.version || "unknown"}) is too old. Upgrade Claude Code CLI to 2.1.111 or newer.`,
+    });
+    return;
+  }
+
   const conversationId = (body.user as string) || requestId;
   if (runtimeConfig.sameConversationPolicy === "latest-wins") {
     clearQueuedRequests(conversationId, requestId);
@@ -559,21 +609,21 @@ export async function handleChatCompletions(
     return;
   }
 
-  // Compute hard timeout for queue wrapper
-  const thinkingBudget = resolveThinkingBudget(
-    req,
-    body as Record<string, unknown>,
-  );
   const tempModel = requestedModel || resolvedModel.id;
   const baseTimeout = getModelTimeout(tempModel);
-  const hardTimeout = thinkingBudget ? baseTimeout * 3 : baseTimeout;
+  const hardTimeout = reasoning.active ? baseTimeout * 3 : baseTimeout;
 
   log("request.start", {
     requestId,
     conversationId,
     model: tempModel,
     stream,
+    agent: agent?.id,
     queueDepth,
+    reasoningMode: reasoning.mode,
+    reasoningSource: reasoning.source,
+    reasoningEffort: reasoning.effort,
+    reasoningBudget: reasoning.budgetTokens,
   });
 
   try {
@@ -630,8 +680,12 @@ export async function handleChatCompletions(
           cliInput.isResume = isResume;
           cliInput._conversationId = conversationId;
           cliInput._startTime = startTime;
-          if (thinkingBudget) {
-            cliInput.thinkingBudget = thinkingBudget;
+          cliInput.reasoningMode = reasoning.mode;
+          if (reasoning.effort) {
+            cliInput.thinkingEffort = reasoning.effort;
+          }
+          if (reasoning.budgetTokens) {
+            cliInput.thinkingBudget = reasoning.budgetTokens;
           }
 
           if (stream) {
@@ -707,8 +761,8 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
     opts;
 
   const baseTimeout = getModelTimeout(cliInput.model);
-  const hardTimeout = cliInput.thinkingBudget ? baseTimeout * 3 : baseTimeout;
-  const stallTimeout = cliInput.thinkingBudget
+  const hardTimeout = hasActiveReasoning(cliInput) ? baseTimeout * 3 : baseTimeout;
+  const stallTimeout = hasActiveReasoning(cliInput)
     ? getStallTimeout(cliInput.model) * 3 // thinking blocks can take a long time before first text
     : getStallTimeout(cliInput.model);
 
@@ -1105,6 +1159,8 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
       systemPrompt: cliInput.systemPrompt,
       isResume: cliInput.isResume,
       thinkingBudget: cliInput.thinkingBudget,
+      thinkingEffort: cliInput.thinkingEffort,
+      reasoningMode: cliInput.reasoningMode,
     };
 
     subprocess.start(cliInput.prompt, startOpts).catch((err: Error) => {
@@ -1253,7 +1309,7 @@ async function runNonStreamingSubprocess(
   allowAuthRetry: boolean,
 ): Promise<{ authErrored: boolean }> {
   const baseTimeout = getModelTimeout(cliInput.model);
-  const timeout = cliInput.thinkingBudget ? baseTimeout * 3 : baseTimeout;
+  const timeout = hasActiveReasoning(cliInput) ? baseTimeout * 3 : baseTimeout;
 
   return new Promise<{ authErrored: boolean }>((resolve) => {
     let authErrored = false;
@@ -1418,6 +1474,8 @@ async function runNonStreamingSubprocess(
         systemPrompt: cliInput.systemPrompt,
         isResume: cliInput.isResume,
         thinkingBudget: cliInput.thinkingBudget,
+        thinkingEffort: cliInput.thinkingEffort,
+        reasoningMode: cliInput.reasoningMode,
       })
       .catch((error: Error) => {
         cleanup.runAll();
@@ -1486,6 +1544,181 @@ export async function handleModels(
     object: "list",
     data,
   });
+}
+
+function buildCapabilitiesPayload(
+  availability: Awaited<ReturnType<typeof modelAvailability.getSnapshot>> | null,
+): Record<string, unknown> {
+  const agents = listBuiltinAgents();
+  const availableModels = availability?.available.map((model) => model.id) || [];
+  const adaptiveModels = availableModels.filter((model) =>
+    supportsAdaptiveReasoningModel(model),
+  );
+  const fixedBudgetModels = availableModels.filter(
+    (model) => !supportsAdaptiveReasoningModel(model),
+  );
+
+  return {
+    object: "capabilities",
+    provider: "claude-max-api-proxy",
+    endpoints: {
+      health: "/health",
+      models: "/v1/models",
+      chatCompletions: "/v1/chat/completions",
+      responses: "/v1/responses",
+      capabilities: "/v1/capabilities",
+    },
+    compatibility: {
+      chatCompletions: true,
+      responses: true,
+      streamingChatCompletions: true,
+      streamingResponses: false,
+      tools: false,
+      structuredOutputs: false,
+      mcpServer: false,
+    },
+    agents: {
+      default: runtimeConfig.defaultAgent ?? null,
+      available: agents,
+      routes: {
+        list: "/v1/agents",
+        details: "/v1/agents/:agentId",
+        chatCompletions: "/v1/agents/:agentId/chat/completions",
+        responses: "/v1/agents/:agentId/responses",
+      },
+    },
+    reasoning: {
+      supportedInputs: [
+        "thinking",
+        "reasoning",
+        "reasoning_effort",
+        "output_config.effort",
+        "X-Thinking-Budget",
+      ],
+      allowedLabels: Object.keys(REASONING_EFFORT_MAP),
+      defaultBudget: runtimeConfig.defaultThinkingBudget ?? null,
+      adaptiveModels,
+      fixedBudgetModels,
+    },
+    models: {
+      available: availableModels,
+    },
+    cli: availability?.cli ?? null,
+  };
+}
+
+export async function handleCapabilities(
+  _req: Request,
+  res: Response,
+): Promise<void> {
+  let availability: Awaited<ReturnType<typeof modelAvailability.getSnapshot>> | null =
+    null;
+  try {
+    availability = await modelAvailability.getSnapshot();
+  } catch {
+    /* surface whatever static capability data we still have */
+  }
+  res.json(buildCapabilitiesPayload(availability));
+}
+
+export function handleAgents(_req: Request, res: Response): void {
+  res.json({
+    object: "list",
+    data: listBuiltinAgents(),
+    default: runtimeConfig.defaultAgent ?? null,
+  });
+}
+
+export function handleAgentDetails(req: Request, res: Response): void {
+  const agentId = typeof req.params?.agentId === "string" ? req.params.agentId : "";
+  const agent = getBuiltinAgent(agentId);
+  if (!agent) {
+    res.status(404).json({
+      error: {
+        message: `Unknown agent '${agentId}'`,
+        type: "invalid_request_error",
+        code: "agent_not_found",
+      },
+    });
+    return;
+  }
+  res.json(agent);
+}
+
+export async function handleResponses(
+  req: Request,
+  res: Response,
+): Promise<void> {
+  const body = (req.body ?? {}) as OpenAIResponsesRequest;
+  if (body.stream) {
+    res.status(400).json({
+      error: {
+        message:
+          "POST /v1/responses currently supports non-streaming responses only. Use POST /v1/chat/completions with stream=true for streaming.",
+        type: "invalid_request_error",
+        code: "stream_not_supported",
+      },
+    });
+    return;
+  }
+
+  const previousConversationId = getConversationIdForResponse(
+    body.previous_response_id,
+  );
+  if (body.previous_response_id && !previousConversationId) {
+    res.status(400).json({
+      error: {
+        message: `Unknown previous_response_id '${body.previous_response_id}'. Reuse a response id returned by this proxy.`,
+        type: "invalid_request_error",
+        code: "invalid_previous_response_id",
+      },
+    });
+    return;
+  }
+
+  const responseSeed = uuidv4().replace(/-/g, "").slice(0, 24);
+  const conversationId =
+    previousConversationId || body.user || `respconv_${responseSeed}`;
+  const chatRequest = responsesToChatRequest(body, conversationId);
+  if (
+    !Array.isArray(chatRequest.messages) ||
+    chatRequest.messages.length === 0 ||
+    chatRequest.messages.every((message) => {
+      if (typeof message.content === "string") {
+        return !message.content.trim();
+      }
+      return false;
+    })
+  ) {
+    res.status(400).json({
+      error: {
+        message: "input is required and must contain at least one text item",
+        type: "invalid_request_error",
+        code: "invalid_input",
+      },
+    });
+    return;
+  }
+
+  const wrappedReq = Object.assign(Object.create(req), {
+    body: chatRequest,
+  }) as Request;
+  const originalJson = res.json.bind(res);
+  res.json = ((payload: unknown) => {
+    if (payload && typeof payload === "object" && "error" in payload) {
+      return originalJson(payload);
+    }
+    const responseId = `resp_${responseSeed}`;
+    rememberResponseConversation(responseId, conversationId);
+    return originalJson(
+      chatToResponsesResponse(payload as OpenAIChatResponse, {
+        responseId,
+        previousResponseId: body.previous_response_id,
+      }),
+    );
+  }) as typeof res.json;
+
+  await handleChatCompletions(wrappedReq, res);
 }
 
 // ---------------------------------------------------------------------------
@@ -1580,6 +1813,7 @@ export async function handleHealth(
       sameConversationPolicy: runtimeConfig.sameConversationPolicy,
       debugQueues: runtimeConfig.debugQueues,
       enableAdminApi: runtimeConfig.enableAdminApi,
+      defaultAgent: runtimeConfig.defaultAgent ?? null,
     },
     auth: availability?.auth ?? undefined,
     models: availability
@@ -1593,6 +1827,15 @@ export async function handleHealth(
           })),
         }
       : undefined,
+    capabilities: availability
+      ? {
+          responses: true,
+          adaptiveReasoningModels: availability.available
+            .map((model) => model.id)
+            .filter((model) => supportsAdaptiveReasoningModel(model)),
+          cli: availability.cli,
+        }
+      : buildCapabilitiesPayload(null),
     pool: poolStatus,
     store: storeStats,
     metrics,

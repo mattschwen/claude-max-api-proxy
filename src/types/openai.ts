@@ -11,6 +11,7 @@ export interface OpenAIChatMessage {
 export interface OpenAIChatRequest {
   model: string;
   messages: OpenAIChatMessage[];
+  agent?: string;
   stream?: boolean;
   temperature?: number;
   max_tokens?: number;
@@ -21,6 +22,20 @@ export interface OpenAIChatRequest {
   thinking?: {
     type?: string;
     budget_tokens?: number;
+    effort?: string;
+    output_config?: {
+      effort?: string;
+    };
+  };
+  reasoning?: {
+    mode?: "off" | "fixed" | "adaptive";
+    effort?: string;
+    budget_tokens?: number;
+    max_budget_tokens?: number;
+  };
+  reasoning_effort?: string;
+  output_config?: {
+    effort?: string;
   };
 }
 

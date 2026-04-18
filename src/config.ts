@@ -26,6 +26,7 @@ export interface ProxyRuntimeConfig {
   debugQueues: boolean;
   enableAdminApi: boolean;
   defaultThinkingBudget: string | undefined;
+  defaultAgent: string | undefined;
 }
 
 // Where runtime-mutable state (the admin-endpoint thinking budget override)
@@ -78,6 +79,7 @@ export function readRuntimeConfig(
     debugQueues: parseBoolean(env.CLAUDE_PROXY_DEBUG_QUEUES, false),
     enableAdminApi: parseBoolean(env.CLAUDE_PROXY_ENABLE_ADMIN_API, false),
     defaultThinkingBudget: persistedDefault ?? envDefault,
+    defaultAgent: env.CLAUDE_PROXY_DEFAULT_AGENT?.trim() || undefined,
   };
 }
 

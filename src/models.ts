@@ -18,6 +18,12 @@ export interface ModelDefinition {
   stallTimeoutMs: number;
 }
 
+export interface ParsedClaudeModelVersion {
+  family: ModelFamily;
+  major: number;
+  minor: number;
+}
+
 const MODEL_DEFINITIONS: ModelDefinition[] = [
   {
     id: "sonnet",
@@ -163,6 +169,29 @@ export function normalizeModelName(
 ): string {
   const normalized = stripModelProviderPrefix(model);
   return normalized || getCanonicalModelId(fallbackFamily);
+}
+
+export function parseClaudeModelVersion(
+  model: string,
+): ParsedClaudeModelVersion | null {
+  const normalized = stripModelProviderPrefix(model).toLowerCase();
+  const match = normalized.match(/(opus|sonnet|haiku)-(\d+)-(\d+)/i);
+  if (!match) return null;
+  return {
+    family: match[1] as ModelFamily,
+    major: Number(match[2]),
+    minor: Number(match[3]),
+  };
+}
+
+export function supportsAdaptiveReasoningModel(model: string): boolean {
+  const parsed = parseClaudeModelVersion(model);
+  if (!parsed) return false;
+  if (parsed.family !== "opus" && parsed.family !== "sonnet") {
+    return false;
+  }
+  if (parsed.major > 4) return true;
+  return parsed.major === 4 && parsed.minor >= 6;
 }
 
 /**

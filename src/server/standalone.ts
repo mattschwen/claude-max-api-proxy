@@ -52,6 +52,9 @@ async function main(): Promise<void> {
   if (runtimeConfig.debugQueues) {
     console.log("Queue debug logging: enabled");
   }
+  if (runtimeConfig.defaultAgent) {
+    console.log(`Default agent: ${runtimeConfig.defaultAgent}`);
+  }
   const availability = await modelAvailability.getSnapshot(true);
   if (availability.available.length === 0) {
     console.warn("  No accessible models detected");

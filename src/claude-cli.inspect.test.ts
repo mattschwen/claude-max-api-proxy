@@ -7,6 +7,7 @@ import {
   parseAuthStatus,
   parseClaudeJsonOutput,
   parseClaudeVersion,
+  supportsAdaptiveReasoningCli,
   supportsXHighEffort,
 } from "./claude-cli.inspect.js";
 import type { ClaudeCliMessage, ClaudeCliResult } from "./types/claude-cli.js";
@@ -139,4 +140,11 @@ test("supportsXHighEffort only enables xhigh on supported CLI versions", () => {
   assert.equal(supportsXHighEffort("claude 2.1.112"), true);
   assert.equal(supportsXHighEffort("claude 2.2.0"), true);
   assert.equal(supportsXHighEffort(undefined), false);
+});
+
+test("supportsAdaptiveReasoningCli requires Claude CLI 2.1.111 or newer", () => {
+  assert.equal(supportsAdaptiveReasoningCli("claude 2.1.110"), false);
+  assert.equal(supportsAdaptiveReasoningCli("claude 2.1.111"), true);
+  assert.equal(supportsAdaptiveReasoningCli("claude 2.2.0"), true);
+  assert.equal(supportsAdaptiveReasoningCli(undefined), false);
 });

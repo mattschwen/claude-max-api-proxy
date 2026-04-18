@@ -23,6 +23,7 @@ test("readRuntimeConfig parses booleans", () => {
     debugQueues: true,
     enableAdminApi: true,
     defaultThinkingBudget: undefined,
+    defaultAgent: undefined,
   });
 });
 
@@ -36,6 +37,7 @@ test("readRuntimeConfig reads default thinking budget", () => {
     debugQueues: false,
     enableAdminApi: false,
     defaultThinkingBudget: "high",
+    defaultAgent: undefined,
   });
 });
 
@@ -52,5 +54,23 @@ test("readRuntimeConfig prefers persisted thinking budget over env", () => {
     debugQueues: false,
     enableAdminApi: false,
     defaultThinkingBudget: "low",
+    defaultAgent: undefined,
+  });
+});
+
+test("readRuntimeConfig reads default expert agent", () => {
+  const config = readRuntimeConfig(
+    {
+      CLAUDE_PROXY_DEFAULT_AGENT: "expert-coder",
+    },
+    undefined,
+  );
+
+  assert.deepEqual(config, {
+    sameConversationPolicy: "latest-wins",
+    debugQueues: false,
+    enableAdminApi: false,
+    defaultThinkingBudget: undefined,
+    defaultAgent: "expert-coder",
   });
 });

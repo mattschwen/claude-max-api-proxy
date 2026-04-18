@@ -2,6 +2,7 @@
  * Converts OpenAI chat request format to Claude CLI input
  */
 import type { OpenAIChatRequest, OpenAIChatMessage } from "../types/openai.js";
+import type { ReasoningEffort, ReasoningMode } from "../reasoning.js";
 
 export type ClaudeModel = string;
 
@@ -12,6 +13,8 @@ export interface CliInput {
   systemPrompt?: string;
   isResume?: boolean;
   thinkingBudget?: number;
+  thinkingEffort?: ReasoningEffort;
+  reasoningMode?: ReasoningMode;
   _conversationId?: string;
   _startTime?: number;
 }

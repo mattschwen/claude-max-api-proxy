@@ -42,6 +42,7 @@ This doc explains what happens inside the proxy when a request comes in. It is i
 
 ```
 src/
+├── agents.ts             Built-in agent profiles and prompt injection
 ├── adapter/              OpenAI ↔ Claude CLI shape conversion
 │   ├── openai-to-cli.ts     request  → subprocess args + prompt
 │   └── cli-to-openai.ts     subprocess stream → OpenAI chunks
@@ -64,21 +65,23 @@ src/
 
 ## Request lifecycle
 
-1. **HTTP in.** `POST /v1/chat/completions` hits `server/routes.ts`. Timeouts are installed here (stall + hard), not in the subprocess manager — the route is the single owner of timeout behavior.
+1. **HTTP in.** `POST /v1/chat/completions`, `POST /v1/responses`, or the scoped `/v1/agents/:agentId/*` variants hit `server/routes.ts`. Timeouts are installed here (stall + hard), not in the subprocess manager — the route is the single owner of timeout behavior.
 
-2. **Adapter: OpenAI → CLI input.** `adapter/openai-to-cli.ts` pulls out system messages, assistant turns, and the final user message. It produces a `CliInput` with a prompt, an optional resolved system prompt, and session metadata. Multi-part content arrays (`[{type:"text", text:"..."}]`) are flattened.
+2. **Agent profile injection.** If the caller selects a built-in agent (or the operator configured `CLAUDE_PROXY_DEFAULT_AGENT`), `agents.ts` prepends the canonical developer prompt and any agent-level defaults before request adaptation.
 
-3. **Conversation queue.** The `user` field becomes the conversation key. Under `latest-wins`, a new request for the same key cancels any in-flight request and drops older queued work. Under `queue`, it waits FIFO. Queue events are emitted as structured logs when `CLAUDE_PROXY_DEBUG_QUEUES=true`.
+3. **Adapter: OpenAI → CLI input.** `adapter/openai-to-cli.ts` pulls out system messages, assistant turns, and the final user message. It produces a `CliInput` with a prompt, an optional resolved system prompt, and session metadata. Multi-part content arrays (`[{type:"text", text:"..."}]`) are flattened.
 
-4. **Session resume decision.** `session/manager.ts` looks up whether this conversation already has a Claude CLI session ID. If so, the subprocess is spawned with `--resume <sessionId>`. Otherwise with `--session-id <newId>`. If resume fails twice in a row, the session is invalidated and the next request creates a fresh one.
+4. **Conversation queue.** The `user` field becomes the conversation key. Under `latest-wins`, a new request for the same key cancels any in-flight request and drops older queued work. Under `queue`, it waits FIFO. Queue events are emitted as structured logs when `CLAUDE_PROXY_DEBUG_QUEUES=true`.
 
-5. **Subprocess spawn.** Every real request spawns a fresh `claude` process via `spawn("claude", args, { env: cleanEnv })`. Base args include `--print --output-format stream-json --verbose --include-partial-messages --dangerously-skip-permissions --model <id>`; session resume, `--fallback-model sonnet`, and `--effort <level>` are added when needed.
+5. **Session resume decision.** `session/manager.ts` looks up whether this conversation already has a Claude CLI session ID. If so, the subprocess is spawned with `--resume <sessionId>`. Otherwise with `--session-id <newId>`. If resume fails twice in a row, the session is invalidated and the next request creates a fresh one.
 
-6. **Stream parsing.** Stdout is parsed line-by-line as newline-delimited JSON. Each message is classified (`assistant`, `result`, `content_delta`) and emitted as a typed event. `adapter/cli-to-openai.ts` transforms each event into an OpenAI `chat.completion.chunk`.
+6. **Subprocess spawn.** Every real request spawns a fresh `claude` process via `spawn("claude", args, { env: cleanEnv })`. Base args include `--print --output-format stream-json --verbose --include-partial-messages --dangerously-skip-permissions --model <id>`; session resume, `--fallback-model sonnet`, and `--effort <level>` are added when needed.
 
-7. **Streaming back.** Chunks are written to the HTTP response as Server-Sent Events. The final `data: [DONE]` sentinel terminates the stream. For non-streaming requests, chunks are buffered and a single `chat.completion` object is returned at the end.
+7. **Stream parsing.** Stdout is parsed line-by-line as newline-delimited JSON. Each message is classified (`assistant`, `result`, `content_delta`) and emitted as a typed event. `adapter/cli-to-openai.ts` transforms each event into an OpenAI `chat.completion.chunk`.
 
-8. **Cleanup.** On `close`, the subprocess is unregistered from the global registry and session state is updated with the resolved CLI session ID (for future resume).
+8. **Streaming back.** Chunks are written to the HTTP response as Server-Sent Events. The final `data: [DONE]` sentinel terminates the stream. For non-streaming requests, chunks are buffered and a single `chat.completion` object is returned at the end.
+
+9. **Cleanup.** On `close`, the subprocess is unregistered from the global registry and session state is updated with the resolved CLI session ID (for future resume).
 
 ## Subprocess safety model
 

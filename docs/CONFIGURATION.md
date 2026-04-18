@@ -9,6 +9,7 @@ All runtime configuration is driven by environment variables. Set them **before*
 | `CLAUDE_PROXY_SAME_CONVERSATION_POLICY` | `latest-wins` | `latest-wins`, `queue` | How concurrent requests for the same conversation are handled. |
 | `CLAUDE_PROXY_DEBUG_QUEUES` | `false` | `true`, `false` | Emit extra structured log events for queue enqueue/drop/block/cancel. |
 | `CLAUDE_PROXY_ENABLE_ADMIN_API` | `false` | `true`, `false` | Mount `GET/POST/PUT /admin/thinking-budget` for live default-thinking changes. |
+| `CLAUDE_PROXY_DEFAULT_AGENT` | _(unset)_ | builtin agent id, currently `expert-coder` | Automatically prepends the built-in expert agent profile to every request unless the caller explicitly chooses another built-in agent route/body value. |
 | `DEFAULT_THINKING_BUDGET` | _(unset)_ | integer, `off`, `low`, `medium`, `high`, `xhigh`, `max` | Server-wide fallback thinking budget when the client does not send one. |
 | `DB_PATH` | `~/.claude-proxy-conversations.db` | filesystem path | Location of the SQLite conversation database. |
 | `SESSION_FILE` | `~/.claude-code-cli-sessions.json` | filesystem path | Location of the conversation-to-session mapping file. |
@@ -58,6 +59,26 @@ Normal request/subprocess/session events are always emitted — this flag only g
 export CLAUDE_PROXY_DEBUG_QUEUES=true
 npm start
 ```
+
+## Default expert agent
+
+Set `CLAUDE_PROXY_DEFAULT_AGENT=expert-coder` to make every request flow
+through the repo's built-in expert coding agent profile.
+
+```bash
+export CLAUDE_PROXY_DEFAULT_AGENT=expert-coder
+npm start
+```
+
+This injects the canonical developer prompt shipped by the proxy and applies
+the agent's default reasoning tier when the caller did not already request one.
+For one-off use, you can leave the env var unset and call the dedicated routes
+instead:
+
+- `GET /v1/agents`
+- `GET /v1/agents/expert-coder`
+- `POST /v1/agents/expert-coder/chat/completions`
+- `POST /v1/agents/expert-coder/responses`
 
 ## Admin API
 

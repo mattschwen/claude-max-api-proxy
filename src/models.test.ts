@@ -5,7 +5,9 @@ import {
   getModelList,
   isValidModel,
   normalizeModelName,
+  parseClaudeModelVersion,
   resolveModelFamily,
+  supportsAdaptiveReasoningModel,
 } from "./models.js";
 
 test("resolveModelFamily handles provider-prefixed and versioned model ids", () => {
@@ -37,4 +39,20 @@ test("getModelList can render a filtered model list", () => {
     createModelDefinition("sonnet", "claude-sonnet-4-7"),
   ]);
   assert.deepEqual(models.map((model) => model.id), ["claude-sonnet-4-7"]);
+});
+
+test("parseClaudeModelVersion extracts family and resolved model version", () => {
+  assert.deepEqual(parseClaudeModelVersion("claude-sonnet-4-7"), {
+    family: "sonnet",
+    major: 4,
+    minor: 7,
+  });
+  assert.equal(parseClaudeModelVersion("sonnet"), null);
+});
+
+test("supportsAdaptiveReasoningModel only enables adaptive reasoning for 4.6+ sonnet and opus", () => {
+  assert.equal(supportsAdaptiveReasoningModel("claude-sonnet-4-7"), true);
+  assert.equal(supportsAdaptiveReasoningModel("claude-opus-4-6"), true);
+  assert.equal(supportsAdaptiveReasoningModel("claude-sonnet-4-5"), false);
+  assert.equal(supportsAdaptiveReasoningModel("claude-haiku-4-7"), false);
 });
