@@ -1,76 +1,70 @@
-<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="claude-max-api-proxy logo">
-  <title>claude-max-api-proxy</title>
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Claw Proxy logo">
+  <title>Claw Proxy</title>
   <defs>
     <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#13111b"/>
-      <stop offset="100%" stop-color="#1e1324"/>
+      <stop offset="0%" stop-color="#050816"/>
+      <stop offset="48%" stop-color="#0b0f1f"/>
+      <stop offset="100%" stop-color="#14061f"/>
     </linearGradient>
-    <linearGradient id="spark" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#ffb066"/>
-      <stop offset="45%" stop-color="#ff7a3c"/>
-      <stop offset="100%" stop-color="#d9421d"/>
+    <linearGradient id="frame" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#28ebff"/>
+      <stop offset="100%" stop-color="#ff3fd1"/>
     </linearGradient>
-    <radialGradient id="glow" cx="50%" cy="50%" r="55%">
-      <stop offset="0%" stop-color="#ff7a3c" stop-opacity="0.35"/>
-      <stop offset="60%" stop-color="#ff7a3c" stop-opacity="0.05"/>
-      <stop offset="100%" stop-color="#ff7a3c" stop-opacity="0"/>
+    <linearGradient id="core" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2cecff"/>
+      <stop offset="50%" stop-color="#9b7bff"/>
+      <stop offset="100%" stop-color="#ff3fd1"/>
+    </linearGradient>
+    <radialGradient id="pinkGlow" cx="32%" cy="46%" r="48%">
+      <stop offset="0%" stop-color="#ff3fd1" stop-opacity="0.20"/>
+      <stop offset="60%" stop-color="#ff3fd1" stop-opacity="0.04"/>
+      <stop offset="100%" stop-color="#ff3fd1" stop-opacity="0"/>
     </radialGradient>
-    <filter id="softshadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feGaussianBlur in="SourceGraphic" stdDeviation="6"/>
+    <radialGradient id="cyanGlow" cx="72%" cy="30%" r="46%">
+      <stop offset="0%" stop-color="#28ebff" stop-opacity="0.22"/>
+      <stop offset="60%" stop-color="#28ebff" stop-opacity="0.04"/>
+      <stop offset="100%" stop-color="#28ebff" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" x="0" y="0" width="28" height="28" patternUnits="userSpaceOnUse">
+      <path d="M 28 0 L 0 0 0 28" fill="none" stroke="#28ebff" stroke-opacity="0.08" stroke-width="1"/>
+    </pattern>
+    <filter id="glow" x="-25%" y="-25%" width="150%" height="150%">
+      <feGaussianBlur stdDeviation="7" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
     </filter>
   </defs>
 
-  <!-- Dark rounded square -->
-  <rect x="0" y="0" width="512" height="512" rx="104" fill="url(#bg)"/>
+  <rect x="0" y="0" width="512" height="512" rx="108" fill="url(#bg)"/>
+  <rect x="6" y="6" width="500" height="500" rx="102" fill="none" stroke="url(#frame)" stroke-width="2.5"/>
+  <rect x="20" y="20" width="472" height="472" rx="92" fill="url(#grid)" opacity="0.35"/>
+  <circle cx="190" cy="250" r="180" fill="url(#pinkGlow)"/>
+  <circle cx="322" cy="206" r="180" fill="url(#cyanGlow)"/>
 
-  <!-- Subtle inner border -->
-  <rect x="6" y="6" width="500" height="500" rx="100" fill="none" stroke="#ff7a3c" stroke-opacity="0.22" stroke-width="2"/>
+  <path d="M164 160
+           C140 160 126 174 126 198
+           L126 226
+           C126 240 116 250 102 250
+           C116 250 126 260 126 274
+           L126 302
+           C126 326 140 340 164 340"
+        fill="none" stroke="#28ebff" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)"/>
+  <path d="M348 160
+           C372 160 386 174 386 198
+           L386 226
+           C386 240 396 250 410 250
+           C396 250 386 260 386 274
+           L386 302
+           C386 326 372 340 348 340"
+        fill="none" stroke="#ff3fd1" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)"/>
 
-  <!-- Radial warm glow -->
-  <circle cx="256" cy="256" r="220" fill="url(#glow)"/>
-
-  <!-- Left API bracket { -->
-  <path d="M152 168
-           C132 168 120 180 120 200
-           L120 236
-           C120 248 112 256 100 256
-           C112 256 120 264 120 276
-           L120 312
-           C120 332 132 344 152 344"
-        fill="none"
-        stroke="#f5efe7"
-        stroke-opacity="0.92"
-        stroke-width="10"
-        stroke-linecap="round"
-        stroke-linejoin="round"/>
-
-  <!-- Right API bracket } -->
-  <path d="M360 168
-           C380 168 392 180 392 200
-           L392 236
-           C392 248 400 256 412 256
-           C400 256 392 264 392 276
-           L392 312
-           C392 332 380 344 360 344"
-        fill="none"
-        stroke="#f5efe7"
-        stroke-opacity="0.92"
-        stroke-width="10"
-        stroke-linecap="round"
-        stroke-linejoin="round"/>
-
-  <!-- 8-point concave spark (Anthropic-style) -->
-  <g transform="translate(256 256)">
-    <path d="M0,-108
-             L18,-18
-             L108,0
-             L18,18
-             L0,108
-             L-18,18
-             L-108,0
-             L-18,-18 Z"
-          fill="url(#spark)"/>
-    <!-- subtle highlight streak -->
-    <path d="M0,-108 L18,-18 L0,0 L-18,-18 Z" fill="#ffffff" fill-opacity="0.18"/>
+  <g transform="translate(256 250)" filter="url(#glow)">
+    <path d="M0,-116 L22,-22 L116,0 L22,22 L0,116 L-22,22 L-116,0 L-22,-22 Z" fill="url(#core)"/>
+    <path d="M0,-116 L22,-22 L0,0 L-22,-22 Z" fill="#ffffff" fill-opacity="0.18"/>
   </g>
+
+  <path d="M184 108 L328 108" stroke="#28ebff" stroke-opacity="0.42" stroke-width="3"/>
+  <path d="M184 392 L328 392" stroke="#ff3fd1" stroke-opacity="0.42" stroke-width="3"/>
 </svg>

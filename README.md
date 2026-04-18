@@ -1,59 +1,56 @@
 <div align="center">
 
-<pre>
- CCC   L      AAA   W   W      PPPP   RRRR    OOO   X   X  Y   Y
-C   C  L     A   A  W   W      P   P  R   R  O   O   X X    Y Y
-C      L     AAAAA  W W W      PPPP   RRRR   O   O    X      Y
-C   C  L     A   A  WW WW      P      R R    O   O   X X     Y
- CCC   LLLLL A   A  W   W      P      R  RR   OOO   X   X    Y
-</pre>
-
-<p>
-  <b>Claw Proxy</b> is the README identity for
-  <code>claude-max-api-proxy</code>.
-</p>
-
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="./assets/banner-dark.svg">
-  <img alt="claude-max-api-proxy - An OpenAI-compatible API server powered by Claude Code CLI." src="./assets/banner-light.svg" width="100%">
+  <img alt="Claw Proxy - cyberpunk OpenAI-compatible gateway powered by Claude Code CLI." src="./assets/banner-light.svg" width="100%">
 </picture>
 
 <br/>
 
+<pre>
+[ CLAW PROXY // LOCALHOST RELAY // CLAUDE MAX ]
+  CCCC   L         A      W     W    PPPP   RRRR    OOO   X   X  Y   Y
+ C       L        A A     W     W    P   P  R   R  O   O   X X    Y Y
+ C       L       AAAAA    W  W  W    PPPP   RRRR   O   O    X      Y
+ C       L       A   A    W WWW W    P      R R    O   O   X X     Y
+  CCCC   LLLLL   A   A     WW WW     P      R  RR   OOO   X   X    Y
+</pre>
+
 <p>
-  <a href="#60-second-launch"><img alt="launch" src="https://img.shields.io/badge/launch-60s-ff7a3c?style=flat-square&labelColor=1a0f1e"></a>
-  <a href="./LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-f5efe7?style=flat-square&labelColor=1a0f1e"></a>
-  <img alt="ci" src="https://img.shields.io/github/actions/workflow/status/mattschwen/claude-max-api-proxy/ci.yml?branch=main&style=flat-square&label=ci&labelColor=1a0f1e">
-  <img alt="node" src="https://img.shields.io/badge/node-%E2%89%A522-4ade80?style=flat-square&labelColor=1a0f1e">
-  <img alt="typescript" src="https://img.shields.io/badge/typescript-strict-3178c6?style=flat-square&labelColor=1a0f1e">
-  <img alt="openai" src="https://img.shields.io/badge/openai-compatible-06b6d4?style=flat-square&labelColor=1a0f1e">
-  <img alt="models" src="https://img.shields.io/badge/models-dynamic-f59e0b?style=flat-square&labelColor=1a0f1e">
-  <img alt="docker" src="https://img.shields.io/badge/docker-optional-38bdf8?style=flat-square&labelColor=1a0f1e">
+  <b>Claw Proxy</b> is the cyberpunk face of
+  <code>claude-max-api-proxy</code>.
 </p>
 
 <p>
-  <b>Point any OpenAI-compatible client at your Claude Max plan.</b><br/>
-  OpenAI in. Claude Code CLI out. Localhost in the middle.
+  <a href="#jack-in"><img alt="jack in" src="https://img.shields.io/badge/jack--in-60s-ff3fd1?style=flat-square&labelColor=08101d"></a>
+  <a href="./LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-3df7ff?style=flat-square&labelColor=08101d"></a>
+  <img alt="node" src="https://img.shields.io/badge/node-22+-7dfb86?style=flat-square&labelColor=08101d">
+  <img alt="openai" src="https://img.shields.io/badge/openai-compatible-3df7ff?style=flat-square&labelColor=08101d">
+  <img alt="models" src="https://img.shields.io/badge/models-dynamic-a87cff?style=flat-square&labelColor=08101d">
+  <img alt="resume" src="https://img.shields.io/badge/sessions-resume-ff9df3?style=flat-square&labelColor=08101d">
+  <img alt="docker" src="https://img.shields.io/badge/docker-optional-4ac1ff?style=flat-square&labelColor=08101d">
+  <img alt="typescript" src="https://img.shields.io/badge/typescript-strict-6d8cff?style=flat-square&labelColor=08101d">
+</p>
+
+<p>
+  <b>Route any OpenAI-compatible client into your live Claude Max session.</b><br/>
+  OpenAI on the edge. Claude Code CLI in the core. Localhost in between.
 </p>
 
 <p>
   <code>Continue.dev</code> / <code>Aider</code> / <code>OpenAI SDKs</code> / <code>curl</code>
-  &rarr;
-  <code>127.0.0.1:3456</code>
-  &rarr;
-  <code>claude-max-api-proxy</code>
-  &rarr;
-  <code>authenticated claude CLI</code>
-  &rarr;
-  <code>Claude Max</code>
+  &rarr; <code>127.0.0.1:3456</code>
+  &rarr; <code>Claw Proxy</code>
+  &rarr; <code>authenticated claude CLI</code>
+  &rarr; <code>Claude Max</code>
 </p>
 
 <p>
-  <a href="#why-it-exists">Why</a> ·
-  <a href="#signal-path">Signal Path</a> ·
-  <a href="#what-you-get">What You Get</a> ·
-  <a href="#60-second-launch">Launch</a> ·
-  <a href="#plug-in-any-openai-client">Usage</a> ·
+  <a href="#why-claw-proxy-exists">Why</a> ·
+  <a href="#signal-grid">Signal Grid</a> ·
+  <a href="#systems-online">Systems</a> ·
+  <a href="#jack-in">Jack In</a> ·
+  <a href="#plug-in-any-openai-client">Clients</a> ·
   <a href="./docs/API.md">API</a> ·
   <a href="./docs/CONFIGURATION.md">Config</a> ·
   <a href="./docs/ARCHITECTURE.md">Architecture</a> ·
@@ -64,7 +61,7 @@ C   C  L     A   A  WW WW      P      R R    O   O   X X     Y
 
 ---
 
-## Why It Exists
+## Why Claw Proxy Exists
 
 You already have a working Claude Max session on your machine. Your local
 `claude` CLI is authenticated. But the rest of the modern tooling ecosystem
@@ -72,59 +69,59 @@ keeps asking for an OpenAI-compatible `baseURL`.
 
 That mismatch is the whole reason this project exists.
 
-`claude-max-api-proxy` runs a local HTTP server on `127.0.0.1:3456`, accepts
-OpenAI-shaped requests, invokes the authenticated Claude Code CLI underneath,
-and streams the result back in the format your client already expects.
+**Claw Proxy** is the product identity for this repo. The repository and
+package stay named `claude-max-api-proxy`, but the thing you actually run is a
+local bridge that speaks OpenAI on the outside and Claude Code CLI on the
+inside.
+
+Claw Proxy runs a local HTTP server on `127.0.0.1:3456`, accepts OpenAI-shaped
+requests, invokes the authenticated Claude Code CLI underneath, and streams the
+result back in the format your client already expects.
 
 No separate Anthropic API key. No extra API bill. No Docker requirement. Just
-your existing Claude Max session exposed behind a clean, local, OpenAI-shaped
+your existing Claude Max session exposed behind a sharp, local, OpenAI-shaped
 surface.
 
 <table>
   <tr>
     <td width="33%" valign="top">
-      <b>OpenAI Shape</b><br/>
+      <b>OUTER SHELL</b><br/>
       Keep your existing SDKs, editors, and agents. Change the base URL, not
       your workflow.
     </td>
     <td width="33%" valign="top">
-      <b>Claude Underneath</b><br/>
+      <b>INNER LINK</b><br/>
       Requests flow through the authenticated <code>claude</code> CLI, so the
       proxy rides the real local session you already use.
     </td>
     <td width="33%" valign="top">
-      <b>Dynamic Models</b><br/>
+      <b>MODEL SCAN</b><br/>
       Stable aliases stay simple while <code>/v1/models</code> publishes the
       exact model IDs your installed CLI resolves today.
     </td>
   </tr>
 </table>
 
-## Signal Path
+## Signal Grid
 
 ```text
-+---------------------------+      +-----------------------------+      +---------------------------+
-| OpenAI-compatible client  | ---> | claude-max-api-proxy       | ---> | Claude Code CLI           |
-|                           |      |                             |      |                           |
-| OpenAI SDK                |      | /v1/chat/completions       |      | authenticated locally     |
-| Continue.dev              |      | /v1/models                 |      | probes real model access  |
-| Aider                     |      | /health                    |      | streams Claude responses  |
-| curl                      |      | local queue + session mgmt |      | uses your Max account     |
-+---------------------------+      +-----------------------------+      +---------------------------+
+[ OPENAI CLIENT ] ---> [ CLAW PROXY @ 127.0.0.1:3456 ] ---> [ CLAUDE CODE CLI ] ---> [ CLAUDE MAX ]
+     SDKs / editors             chat + models + health            authenticated locally      your paid plan
+     curl / agents              queue + session spine             dynamic model probes        no extra API key
 ```
 
-## What You Get
+## Systems Online
 
 | Surface | Why it matters |
 | --- | --- |
-| OpenAI-compatible API | `POST /v1/chat/completions`, `GET /v1/models`, and `GET /health`, with streaming and non-streaming support. |
+| OpenAI-compatible edge | `POST /v1/chat/completions`, `GET /v1/models`, and `GET /health`, with streaming and non-streaming support. |
 | Zero extra credentials | Reuses the machine's existing `claude auth login` session instead of asking clients for a second API key. |
 | Dynamic model routing | Probes stable families like `sonnet`, `opus`, and `haiku`, then surfaces the exact model IDs your local Claude CLI currently resolves. |
 | Session continuity | Reuses the OpenAI `user` field as a conversation key and resumes the underlying CLI session automatically. |
 | Operational discipline | Warm subprocess pool, per-family stall timeouts, kill escalation, structured logs, and a detailed `/health` snapshot. |
 | Sensible deployment | Plain Node.js checkout first. Docker supported, but optional. macOS and Linux service docs included. |
 
-## 60-Second Launch
+## Jack In
 
 You need **Node.js 22+**, **npm**, and the **Claude Code CLI** already logged
 in.
@@ -232,7 +229,7 @@ those runtime-resolved IDs.
 {
   "models": [
     {
-      "title": "Claude via Max Proxy",
+      "title": "Claw Proxy",
       "provider": "openai",
       "model": "sonnet",
       "apiBase": "http://127.0.0.1:3456/v1",
@@ -250,7 +247,7 @@ those runtime-resolved IDs.
 ```json
 {
   "providers": {
-    "claude-max-proxy": {
+    "claw-proxy": {
       "baseUrl": "http://127.0.0.1:3456/v1",
       "api": "openai-completions",
       "auth": "api-key",
@@ -307,7 +304,7 @@ npm start
 
 ## Compare the Options
 
-| Capability | `claude-max-api-proxy` | Direct Anthropic API | Claude Code CLI only |
+| Capability | `Claw Proxy` | Direct Anthropic API | Claude Code CLI only |
 | --- | :---: | :---: | :---: |
 | Uses your Max plan | ✅ | ❌ | ✅ |
 | OpenAI-compatible endpoints | ✅ | ❌ | ❌ |
