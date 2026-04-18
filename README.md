@@ -313,9 +313,9 @@ npm start
 | [docs/macos-setup.md](./docs/macos-setup.md) | LaunchAgent setup for automatic startup on macOS |
 | [docs/linux-systemd.md](./docs/linux-systemd.md) | systemd user-service setup on Linux |
 | [docs/docker-setup.md](./docs/docker-setup.md) | Optional container deployment and Compose setup |
-| [CONTRIBUTING.md](./CONTRIBUTING.md) | Dev setup, style, tests, and PR flow |
-| [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) | Community expectations |
-| [SECURITY.md](./SECURITY.md) | Private vulnerability reporting |
+| [docs/CONTRIBUTING.md](./docs/CONTRIBUTING.md) | Dev setup, style, tests, and PR flow |
+| [docs/CODE_OF_CONDUCT.md](./docs/CODE_OF_CONDUCT.md) | Community expectations |
+| [docs/SECURITY.md](./docs/SECURITY.md) | Private vulnerability reporting |
 
 ## Compare the Options
 
@@ -353,9 +353,9 @@ their compiled `dist/**/*.test.js` output.
 ## Community
 
 Issues and pull requests are welcome. Read
-[CONTRIBUTING.md](./CONTRIBUTING.md) before opening a PR, use the issue
-templates when they apply, and follow the expectations in
-[CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md).
+[docs/CONTRIBUTING.md](./docs/CONTRIBUTING.md) before opening a PR, use the
+issue templates when they apply, and follow the expectations in
+[docs/CODE_OF_CONDUCT.md](./docs/CODE_OF_CONDUCT.md).
 
 ## Security
 
@@ -365,7 +365,7 @@ can spend your Claude Max quota.
 
 Keep it on localhost unless you deliberately place it behind real network
 controls, and leave the optional admin API disabled unless you explicitly need
-it. See [SECURITY.md](./SECURITY.md) for responsible disclosure.
+it. See [docs/SECURITY.md](./docs/SECURITY.md) for responsible disclosure.
 
 ## License
 
