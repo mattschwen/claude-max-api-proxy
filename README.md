@@ -2,11 +2,11 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="./assets/banner-dark.svg">
-  <img alt="Claw Proxy - cyberpunk OpenAI-compatible gateway powered by Claude Code CLI." src="./assets/banner-light.svg" width="100%">
+  <img alt="Claw Proxy - OpenAI-compatible gateway powered by Claude Code CLI." src="./assets/banner-light.svg" width="100%">
 </picture>
 
 <p>
-  <b>Claw Proxy</b> is the cyberpunk face of
+  <b>Claw Proxy</b> is the user-facing name for
   <code>claude-max-api-proxy</code>.
 </p>
 
