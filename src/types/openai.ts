@@ -21,6 +21,20 @@ export interface OpenAIChatRequest {
   thinking?: {
     type?: string;
     budget_tokens?: number;
+    effort?: string;
+    output_config?: {
+      effort?: string;
+    };
+  };
+  reasoning?: {
+    mode?: "off" | "fixed" | "adaptive";
+    effort?: string;
+    budget_tokens?: number;
+    max_budget_tokens?: number;
+  };
+  reasoning_effort?: string;
+  output_config?: {
+    effort?: string;
   };
 }
 

@@ -103,9 +103,10 @@ surface.
 
 | Surface | Why it matters |
 | --- | --- |
-| OpenAI-compatible edge | `POST /v1/chat/completions`, `GET /v1/models`, and `GET /health`, with streaming and non-streaming support. |
+| OpenAI-compatible edge | `POST /v1/chat/completions`, `POST /v1/responses`, `GET /v1/models`, `GET /v1/capabilities`, and `GET /health`. |
 | Zero extra credentials | Reuses the machine's existing `claude auth login` session instead of asking clients for a second API key. |
 | Dynamic model routing | Probes stable families like `sonnet`, `opus`, and `haiku`, then surfaces the exact model IDs your local Claude CLI currently resolves. |
+| Agent discovery | `GET /v1/capabilities` advertises the current runtime surface, CLI feature flags, and which resolved models use adaptive reasoning. |
 | Session continuity | Reuses the OpenAI `user` field as a conversation key and resumes the underlying CLI session automatically. |
 | Operational discipline | CLI warm-up loop, per-family stall timeouts, kill escalation, structured logs, and a detailed `/health` snapshot. |
 | Sensible deployment | Plain Node.js checkout first. Docker supported, but optional. macOS and Linux service docs included. |
@@ -134,6 +135,7 @@ then binds to `http://127.0.0.1:3456`.
 ```bash
 curl http://127.0.0.1:3456/health
 curl http://127.0.0.1:3456/v1/models
+curl http://127.0.0.1:3456/v1/capabilities
 ```
 
 > [!IMPORTANT]
@@ -208,6 +210,12 @@ curl -N http://127.0.0.1:3456/v1/chat/completions \
 The proxy accepts stable family aliases and resolves them to whatever exact
 version the installed Claude CLI currently exposes. `GET /v1/models` returns
 those runtime-resolved IDs.
+
+### Modern agent surfaces
+
+- `POST /v1/chat/completions` remains the best choice for existing OpenAI-compatible SDKs and streaming clients.
+- `POST /v1/responses` provides a minimal Responses API surface for newer agent stacks that want `input`, `instructions`, and `previous_response_id`.
+- `GET /v1/capabilities` lets adapters inspect current model IDs, reasoning support, and local Claude CLI feature flags before they connect.
 
 ### Example client snippets
 

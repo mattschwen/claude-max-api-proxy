@@ -8,7 +8,9 @@ import { createServer, type Server } from "http";
 import type { Socket } from "net";
 import {
   handleChatCompletions,
+  handleCapabilities,
   handleModels,
+  handleResponses,
   handleHealth,
   handleGetThinkingBudget,
   handleSetThinkingBudget,
@@ -56,7 +58,9 @@ function createApp(): express.Application {
 
   app.get("/health", handleHealth);
   app.get("/v1/models", handleModels);
+  app.get("/v1/capabilities", handleCapabilities);
   app.post("/v1/chat/completions", handleChatCompletions);
+  app.post("/v1/responses", handleResponses);
   if (runtimeConfig.enableAdminApi) {
     app.get("/admin/thinking-budget", handleGetThinkingBudget);
     app.post("/admin/thinking-budget", handleSetThinkingBudget);

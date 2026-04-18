@@ -20,11 +20,26 @@ function makeManager(
 ): ModelAvailabilityManager {
   let idx = 0;
   return new ModelAvailabilityManager({
+    verifyClaude: async () => ({ ok: true, version: "claude 2.1.112" }),
     verifyAuth: async () => verifyAuthCalls[Math.min(idx++, verifyAuthCalls.length - 1)](),
     probeModelAvailability: async (model) => ({
       ok: true,
       model,
       resolvedModel: "claude-sonnet-4-7",
+      init: {
+        type: "system",
+        subtype: "init",
+        cwd: process.cwd(),
+        session_id: "session-1",
+        tools: ["Read", "Write"],
+        mcp_servers: [],
+        model: "claude-sonnet-4-7",
+        permissionMode: "default",
+        slash_commands: [],
+        skills: [],
+        plugins: [],
+        uuid: "uuid-1",
+      },
     }),
     getModelDefinitions: () => [definition],
     exitProcess: (code: number) => {
@@ -55,6 +70,7 @@ test("ModelAvailabilityManager cancels a scheduled self-exit after auth recovery
   const recovered = (await manager.getSnapshot(true)) as ModelAvailabilitySnapshot;
   assert.equal(manager.getConsecutiveAuthFailures(), 0);
   assert.deepEqual(recovered.available.map((model) => model.id), ["claude-sonnet-4-7"]);
+  assert.equal(recovered.cli?.supportsAdaptiveReasoning, true);
 
   await new Promise((resolve) => setTimeout(resolve, 350));
   assert.deepEqual(exits, []);

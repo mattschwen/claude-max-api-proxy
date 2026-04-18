@@ -25,11 +25,15 @@ import type { ClaudeModel } from "../adapter/openai-to-cli.js";
 import { log } from "../logger.js";
 import {
   getCleanClaudeEnv,
-  supportsXHighEffort,
   verifyClaude,
   verifyAuth,
 } from "../claude-cli.inspect.js";
 import { tokenGate } from "../auth/token-gate.js";
+import {
+  thinkingBudgetToEffort,
+  type ReasoningEffort,
+  type ReasoningMode,
+} from "../reasoning.js";
 
 const KILL_ESCALATION_MS = 5000;
 
@@ -40,6 +44,8 @@ export interface SubprocessOptions {
   isResume?: boolean;
   cwd?: string;
   thinkingBudget?: number;
+  thinkingEffort?: ReasoningEffort;
+  reasoningMode?: ReasoningMode;
 }
 
 export interface SubprocessEvents {
@@ -92,25 +98,6 @@ class SubprocessRegistry {
 }
 
 export const subprocessRegistry = new SubprocessRegistry();
-
-/**
- * Map a thinking budget (token count) to the Claude CLI's --effort level.
- * The CLI no longer accepts a raw token count; only level names.
- *
- * Thresholds chosen to line up with the REASONING_EFFORT_MAP in routes.ts:
- *   low = 5000, medium = 10000, high = 32000, xhigh = 48000, max = 64000
- */
-export function thinkingBudgetToEffort(
-  budget: number,
-  xhighSupported = supportsXHighEffort(),
-): string | undefined {
-  if (!Number.isFinite(budget) || budget <= 0) return undefined;
-  if (budget > 48000) return "max";
-  if (budget > 32000) return xhighSupported ? "xhigh" : "max";
-  if (budget > 10000) return "high";
-  if (budget > 5000) return "medium";
-  return "low";
-}
 
 export class ClaudeSubprocess extends EventEmitter {
   private process: ChildProcess | null = null;
@@ -167,12 +154,14 @@ export class ClaudeSubprocess extends EventEmitter {
               this.process.stdin?.end();
 
               const pid = this.process.pid;
-              const effort = options.thinkingBudget
+              const effort = options.thinkingEffort ||
+                (options.thinkingBudget
                 ? thinkingBudgetToEffort(options.thinkingBudget)
-                : undefined;
+                : undefined);
               log("subprocess.spawn", {
                 pid,
                 model: options.model,
+                reasoningMode: options.reasoningMode ?? "off",
                 thinking: effort ?? "off",
                 thinkingTokens: options.thinkingBudget ?? 0,
                 sessionId: options.sessionId?.slice(0, 8),
@@ -274,9 +263,12 @@ export class ClaudeSubprocess extends EventEmitter {
     // Map thinking budget (token count) to Claude CLI's --effort levels.
     // The CLI no longer supports a raw token budget; only level-based effort.
     // Mapping matches the inverse of REASONING_EFFORT_MAP in routes.ts.
-    if (options.thinkingBudget) {
-      const level = thinkingBudgetToEffort(options.thinkingBudget);
-      if (level) args.push("--effort", level);
+    const level = options.thinkingEffort ||
+      (options.thinkingBudget
+        ? thinkingBudgetToEffort(options.thinkingBudget)
+        : undefined);
+    if (level) {
+      args.push("--effort", level);
     }
 
     return { args, prompt: finalPrompt };
@@ -351,3 +343,4 @@ export class ClaudeSubprocess extends EventEmitter {
   }
 }
 export { verifyClaude, verifyAuth } from "../claude-cli.inspect.js";
+export { thinkingBudgetToEffort } from "../reasoning.js";

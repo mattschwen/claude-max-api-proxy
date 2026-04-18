@@ -1,8 +1,13 @@
 import { spawn } from "child_process";
 import { extractTextContent } from "./adapter/cli-to-openai.js";
-import { isAssistantMessage, isResultMessage } from "./types/claude-cli.js";
+import {
+  isAssistantMessage,
+  isResultMessage,
+  isSystemInit,
+} from "./types/claude-cli.js";
 import type {
   ClaudeCliAssistant,
+  ClaudeCliInit,
   ClaudeCliMessage,
   ClaudeCliResult,
 } from "./types/claude-cli.js";
@@ -14,6 +19,7 @@ const PROBE_PROMPT = "Reply with exactly: OK";
 const COMMAND_KILL_GRACE_MS = 5000;
 const COMMAND_FORCE_RELEASE_MS = 1000;
 const XHIGH_MIN_VERSION = { major: 2, minor: 1, patch: 112 } as const;
+const ADAPTIVE_REASONING_MIN_VERSION = { major: 2, minor: 1, patch: 111 } as const;
 
 const CLEAN_CLAUDE_ENV = (() => {
   const env = { ...process.env };
@@ -53,6 +59,7 @@ export interface ModelProbeResult {
   ok: boolean;
   model: string;
   resolvedModel?: string;
+  init?: ClaudeCliInit;
   error?: ClaudeProxyError;
 }
 
@@ -78,19 +85,32 @@ export function parseClaudeVersion(
   };
 }
 
+function versionAtLeast(
+  parsed: ClaudeCliVersion | null,
+  minimum: ClaudeCliVersion,
+): boolean {
+  if (!parsed) return false;
+  if (parsed.major !== minimum.major) return parsed.major > minimum.major;
+  if (parsed.minor !== minimum.minor) return parsed.minor > minimum.minor;
+  return parsed.patch >= minimum.patch;
+}
+
+export function getCachedClaudeVersion(): string | undefined {
+  return cachedClaudeVersion;
+}
+
 export function supportsXHighEffort(
   version: string | undefined = cachedClaudeVersion,
 ): boolean {
   const parsed = parseClaudeVersion(version);
-  if (!parsed) return false;
+  return versionAtLeast(parsed, XHIGH_MIN_VERSION);
+}
 
-  if (parsed.major !== XHIGH_MIN_VERSION.major) {
-    return parsed.major > XHIGH_MIN_VERSION.major;
-  }
-  if (parsed.minor !== XHIGH_MIN_VERSION.minor) {
-    return parsed.minor > XHIGH_MIN_VERSION.minor;
-  }
-  return parsed.patch >= XHIGH_MIN_VERSION.patch;
+export function supportsAdaptiveReasoningCli(
+  version: string | undefined = cachedClaudeVersion,
+): boolean {
+  const parsed = parseClaudeVersion(version);
+  return versionAtLeast(parsed, ADAPTIVE_REASONING_MIN_VERSION);
 }
 
 export function parseClaudeJsonOutput(raw: string): ClaudeCliMessage[] {
@@ -384,19 +404,13 @@ export async function probeModelAvailability(
     return { ok: false, model, error };
   }
 
-  const initMessage = messages.find(
-    (
-      message,
-    ): message is Extract<
-      ClaudeCliMessage,
-      { type: "system"; subtype: "init" }
-    > => message.type === "system" && message.subtype === "init",
-  );
+  const initMessage = messages.find(isSystemInit);
 
   return {
     ok: result.code === 0,
     model,
     resolvedModel: initMessage?.model,
+    init: initMessage,
     error:
       result.code === 0
         ? undefined

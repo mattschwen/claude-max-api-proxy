@@ -1,9 +1,13 @@
 import {
   probeModelAvailability,
+  verifyClaude,
   verifyAuth,
   type ClaudeAuthStatus,
   type ClaudeProxyError,
+  supportsAdaptiveReasoningCli,
+  supportsXHighEffort,
 } from "./claude-cli.inspect.js";
+import type { ClaudeCliInit } from "./types/claude-cli.js";
 import {
   createModelDefinition,
   getModelDefinitions,
@@ -36,6 +40,17 @@ const AUTH_SELF_EXIT_DELAY_MS = 250;
 export interface ModelAvailabilitySnapshot {
   checkedAt: number;
   auth: ClaudeAuthStatus | null;
+  cli: {
+    version?: string;
+    supportsXHighEffort: boolean;
+    supportsAdaptiveReasoning: boolean;
+    permissionMode?: string;
+    tools: string[];
+    mcpServers: unknown[];
+    slashCommands: unknown[];
+    skills: unknown[];
+    plugins: unknown[];
+  } | null;
   available: ModelDefinition[];
   unavailable: Array<{
     definition: ModelDefinition;
@@ -54,6 +69,7 @@ function pickDefaultModel(
 }
 
 interface ModelAvailabilityDeps {
+  verifyClaude: typeof verifyClaude;
   verifyAuth: typeof verifyAuth;
   probeModelAvailability: typeof probeModelAvailability;
   getModelDefinitions: typeof getModelDefinitions;
@@ -61,6 +77,7 @@ interface ModelAvailabilityDeps {
 }
 
 const defaultDeps: ModelAvailabilityDeps = {
+  verifyClaude,
   verifyAuth,
   probeModelAvailability,
   getModelDefinitions,
@@ -186,8 +203,30 @@ export class ModelAvailabilityManager {
     );
   }
 
+  private buildCliSnapshot(
+    version: string | undefined,
+    init?: ClaudeCliInit,
+  ): ModelAvailabilitySnapshot["cli"] {
+    return {
+      version,
+      supportsXHighEffort: supportsXHighEffort(version),
+      supportsAdaptiveReasoning: supportsAdaptiveReasoningCli(version),
+      permissionMode: init?.permissionMode,
+      tools: Array.isArray(init?.tools) ? init.tools : [],
+      mcpServers: Array.isArray(init?.mcp_servers) ? init.mcp_servers : [],
+      slashCommands: Array.isArray(init?.slash_commands)
+        ? init.slash_commands
+        : [],
+      skills: Array.isArray(init?.skills) ? init.skills : [],
+      plugins: Array.isArray(init?.plugins) ? init.plugins : [],
+    };
+  }
+
   private async refresh(): Promise<ModelAvailabilitySnapshot> {
-    const authResult = await this.deps.verifyAuth();
+    const [cliResult, authResult] = await Promise.all([
+      this.deps.verifyClaude(),
+      this.deps.verifyAuth(),
+    ]);
     const definitions = this.deps.getModelDefinitions();
 
     if (!authResult.ok) {
@@ -205,6 +244,7 @@ export class ModelAvailabilityManager {
       return {
         checkedAt: Date.now(),
         auth: authResult.status ?? null,
+        cli: this.buildCliSnapshot(cliResult.version),
         available: [],
         unavailable: definitions.map((definition) => ({
           definition,
@@ -230,12 +270,14 @@ export class ModelAvailabilityManager {
 
     const available: ModelDefinition[] = [];
     const unavailable: ModelAvailabilitySnapshot["unavailable"] = [];
+    let cliInit: ClaudeCliInit | undefined;
 
     for (const probe of probes) {
       const resolvedDefinition = createModelDefinition(
         probe.definition.family,
         probe.result.resolvedModel || probe.definition.alias,
       );
+      cliInit ||= probe.result.init;
 
       if (probe.result.ok) {
         available.push(resolvedDefinition);
@@ -255,6 +297,7 @@ export class ModelAvailabilityManager {
     return {
       checkedAt: Date.now(),
       auth: authResult.status ?? null,
+      cli: this.buildCliSnapshot(cliResult.version, cliInit),
       available,
       unavailable,
     };
