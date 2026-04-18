@@ -24,11 +24,17 @@ claude auth status
 
 The proxy runs `claude auth status` at startup and refuses to report a healthy `/health.auth.loggedIn: true` until this passes.
 
-### Startup hangs for 20+ seconds
+### Startup takes 20+ seconds
 
-That's normal. The proxy runs synchronous `verifyClaude`, `verifyAuth`, and per-model probes before binding `:3456`. Total cold-start is typically **15–25 seconds**. If you need to test the server is starting, tail the stdout log — you'll see the sequence.
+That's normal. The proxy runs `verifyClaude`, `verifyAuth`, and parallel
+per-model probes before binding `:3456`. Total cold-start is typically
+**15–30 seconds**, though a slow or completely cold CLI can push the probe
+phase toward the **60 second** timeout cap. If you need to confirm the server
+is still booting, tail the stdout log and watch the sequence.
 
-If it's much longer than 25 seconds, check whether `claude auth status` hangs on its own from a normal shell. The proxy can't be faster than the CLI it wraps.
+If it's still not bound after roughly a minute, check whether `claude auth status`
+or `claude --print --model sonnet "hi"` hangs on its own from a normal shell.
+The proxy can't be faster than the CLI it wraps.
 
 ---
 
@@ -40,7 +46,7 @@ It means **one** of these things:
 
 1. Claude CLI is not authenticated.
 2. The authenticated CLI account can't access any of the model IDs the proxy knows about.
-3. The startup model probes all timed out at 15 s.
+3. The startup model probes all timed out at 60 s.
 
 ### Check auth
 
@@ -62,13 +68,18 @@ Look at `models.unavailable`. Each entry has an `id`, a `code`, and a `message`.
 | --- | --- |
 | `model_unavailable` | The CLI explicitly said the account has no access. Expected for model IDs you don't have entitlement to. |
 | `auth_required` | The probe hit an auth error. Re-run `claude auth login`. |
-| `claude_cli_error` with `code: 143` | The probe was killed by SIGTERM — it timed out at 15 s. See below. |
+| `claude_cli_error` with a message like `Claude CLI exited with code 143` | The probe was killed by SIGTERM — it timed out at 60 s. See below. |
 
-### Cold-CLI probe timeout (the 143 case)
+### Cold-CLI probe timeout (the 60 s case)
 
-If the proxy starts on a completely cold CLI, the first `claude --print` invocations can take longer than the 15 s probe timeout because they have to warm up an auth handshake. When that happens, the probes get SIGTERM'd and every model shows up as unavailable even though the underlying CLI actually works.
+If the proxy starts on a completely cold or slow CLI, the first
+`claude --print` invocations can still take longer than the 60 s probe timeout
+because they have to warm auth and model resolution. When that happens, the
+probes get SIGTERM'd and every model shows up as unavailable even though the
+underlying CLI actually works.
 
-**Fix:** restart the proxy once more. The second startup runs against a warm CLI and the probes succeed.
+**Fix:** restart the proxy once more. A second startup often runs against a
+warmer CLI and the probes succeed.
 
 ```bash
 # macOS LaunchAgent
@@ -78,7 +89,9 @@ launchctl kickstart -k gui/$(id -u)/com.claude-max-api-proxy
 # Just Ctrl-C and re-run `npm start`
 ```
 
-If this happens every time you start the proxy, your `claude` CLI installation is genuinely slow to warm. Run `claude --print --model sonnet "hi"` once manually from a normal shell to measure.
+If this happens every time you start the proxy, your `claude` CLI installation
+is genuinely slow to warm or stuck. Run `claude --print --model sonnet "hi"`
+once manually from a normal shell to measure it.
 
 ---
 

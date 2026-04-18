@@ -20,7 +20,7 @@ This doc explains what happens inside the proxy when a request comes in. It is i
                                                         │                ▼                  │
                                                         │   ┌──────────────────────────┐    │
                                                         │   │  Subprocess manager       │    │
-                                                        │   │  warm pool + spawn        │    │
+                                                        │   │  warm-up + spawn          │    │
                                                         │   └────────────┬──────────────┘    │
                                                         └────────────────┼───────────────────┘
                                                                          ▼
@@ -50,7 +50,7 @@ src/
 │   └── standalone.ts        Startup probes, graceful shutdown, CLI entry
 ├── subprocess/           Claude CLI subprocess lifecycle
 │   ├── manager.ts           ClaudeSubprocess + global registry
-│   └── pool.ts              Warm pool for fast first-token latency
+│   └── pool.ts              CLI warm-up loop + /health pool status
 ├── session/              Conversation → CLI session-id mapping
 │   └── manager.ts           Resume logic, failure tracking, invalidation
 ├── store/                SQLite conversation store
@@ -72,7 +72,7 @@ src/
 
 4. **Session resume decision.** `session/manager.ts` looks up whether this conversation already has a Claude CLI session ID. If so, the subprocess is spawned with `--resume <sessionId>`. Otherwise with `--session-id <newId>`. If resume fails twice in a row, the session is invalidated and the next request creates a fresh one.
 
-5. **Subprocess spawn.** `subprocess/manager.ts` either takes a pre-warmed `claude` process out of the pool or spawns a new one via `spawn("claude", args, { env: cleanEnv })`. Args always include `--print --output-format stream-json --verbose --include-partial-messages --dangerously-skip-permissions --model <id>`.
+5. **Subprocess spawn.** Every real request spawns a fresh `claude` process via `spawn("claude", args, { env: cleanEnv })`. Base args include `--print --output-format stream-json --verbose --include-partial-messages --dangerously-skip-permissions --model <id>`; session resume, `--fallback-model sonnet`, and `--effort <level>` are added when needed.
 
 6. **Stream parsing.** Stdout is parsed line-by-line as newline-delimited JSON. Each message is classified (`assistant`, `result`, `content_delta`) and emitted as a typed event. `adapter/cli-to-openai.ts` transforms each event into an OpenAI `chat.completion.chunk`.
 
@@ -100,29 +100,44 @@ The subprocess manager owns four invariants that keep the proxy stable under loa
 
 Every spawned subprocess registers itself with a module-level `SubprocessRegistry`. On `SIGTERM` / `SIGINT`, the standalone server calls `subprocessRegistry.killAll()` to ensure no orphaned `claude` processes survive a graceful shutdown.
 
-## Warm subprocess pool
+## CLI warm-up loop
 
-Cold spawning a `claude` CLI is slow — it has to load Node, run its own auth handshake, resolve the model, and negotiate with Anthropic's backend. The warm pool keeps a small number of pre-spawned `claude` processes ready to serve the next request.
+Cold-starting the Claude CLI is slow — it has to load Node, warm auth, and
+resolve model access. `subprocess/pool.ts` reduces that cold-start penalty, but
+it is **not** a checkout-and-reuse worker pool. Every user request still
+spawns its own `claude` subprocess.
 
-- Pool size defaults to **5** processes.
-- Warming happens at startup, and re-warms after each request is served.
+- Pool size defaults to **5**, which is the number of quick warm-up probes run per cycle.
+- On initial startup, the warm-up module also runs a one-shot deep warm probe (`claude --print --model haiku "hi"`).
+- Every 30 seconds, if warm state has gone stale, the module refreshes the warm-up probes.
 - The `/health` endpoint exposes `pool.isWarm`, `pool.poolSize`, `pool.warming`, and `pool.warmedAt`.
 
 ## Startup sequence
 
-`server/standalone.ts` runs these steps **synchronously** before binding the HTTP server:
+`server/standalone.ts` blocks on these gating checks before binding the HTTP
+server:
 
 1. `verifyClaude()` — `claude --version`
 2. `verifyAuth()` — `claude auth status`
-3. `probeModelAvailability()` — spawns `claude --print --model <id>` once per candidate model with a 15 s timeout
-4. Initialize session store + conversation store
-5. Warm the subprocess pool
-6. Bind HTTP server to `:3456`
+3. `modelAvailability.getSnapshot(true)` — probes each candidate family in parallel via `probeModelAvailability()` with a 60 s timeout per probe
+4. `startServer()` — binds the HTTP server to `:3456`
 
-Total cold start is typically **15–25 seconds**. That's deliberate — we want the `/health` endpoint to give clients accurate information from the first request, not lie and then start failing.
+The session-manager load and CLI warm-up loop are kicked off by imported
+modules while the process boots. The SQLite conversation store initializes
+lazily on first use.
+
+Total cold start is typically **15–30 seconds**, but the model-probe phase is
+allowed to stretch toward **60 seconds** on a slow or completely cold CLI.
+That's deliberate — we want the `/health` endpoint to give clients accurate
+information from the first request, not lie and then start failing.
 
 > [!NOTE]
-> On a truly cold CLI (no warm auth cache at all), the startup model probes can all time out at 15 s because the first `claude` invocation also has to warm the auth handshake. If this leaves `/health.models.available` empty even though the subprocess pool warmed successfully, one `launchctl kickstart` (or service restart) resolves it — the second pass lands on a warm CLI. See [TROUBLESHOOTING](./TROUBLESHOOTING.md).
+> On a truly cold or slow CLI, the startup model probes can still hit the 60 s
+> cap because the first `claude` invocations also have to warm auth and model
+> resolution. If this leaves `/health.models.available` empty even though auth
+> is valid, restart once more and test `claude --print --model sonnet "hi"`
+> manually. Repeated 60 s timeouts usually mean the CLI itself is slow or
+> wedged. See [TROUBLESHOOTING](./TROUBLESHOOTING.md).
 
 ## Structured logging
 

@@ -9,7 +9,7 @@ All runtime configuration is driven by environment variables. Set them **before*
 | `CLAUDE_PROXY_SAME_CONVERSATION_POLICY` | `latest-wins` | `latest-wins`, `queue` | How concurrent requests for the same conversation are handled. |
 | `CLAUDE_PROXY_DEBUG_QUEUES` | `false` | `true`, `false` | Emit extra structured log events for queue enqueue/drop/block/cancel. |
 | `CLAUDE_PROXY_ENABLE_ADMIN_API` | `false` | `true`, `false` | Mount `GET/POST/PUT /admin/thinking-budget` for live default-thinking changes. |
-| `DEFAULT_THINKING_BUDGET` | _(unset)_ | integer, `off`, `low`, `medium`, `high`, `max` | Server-wide fallback thinking budget when the client does not send one. |
+| `DEFAULT_THINKING_BUDGET` | _(unset)_ | integer, `off`, `low`, `medium`, `high`, `xhigh`, `max` | Server-wide fallback thinking budget when the client does not send one. |
 | `DB_PATH` | `~/.claude-proxy-conversations.db` | filesystem path | Location of the SQLite conversation database. |
 | `SESSION_FILE` | `~/.claude-code-cli-sessions.json` | filesystem path | Location of the conversation-to-session mapping file. |
 | `RUNTIME_STATE_FILE` | `dirname(DB_PATH)/runtime-state.json` | filesystem path | Location of persisted admin-endpoint runtime state. |
@@ -17,6 +17,10 @@ All runtime configuration is driven by environment variables. Set them **before*
 | `PORT` (positional arg) | `3456` | any free port | Pass as `node dist/server/standalone.js <port>`. |
 
 ## Same-conversation policy
+
+> [!NOTE]
+> `xhigh` maps to an intermediate 48000-token tier. If the installed Claude
+> CLI does not support `--effort xhigh`, the proxy falls back to `max`.
 
 The proxy uses the OpenAI-standard `user` field as a conversation key. When two requests share the same `user`, the policy decides what happens.
 

@@ -111,11 +111,12 @@ Leave those mounts out unless you explicitly need them.
 The proxy enables Claude's extended thinking when any of these sources provide a budget, checked in this order:
 
 1. Request body `thinking.budget_tokens` — Anthropic style.
-2. Request body `reasoning_effort` — OpenAI style. Values: `off`, `low`, `medium`, `high`, `max`.
+2. Request body `reasoning_effort` — OpenAI style. Values: `off`, `low`, `medium`, `high`, `xhigh`, `max`.
 3. Request header `X-Thinking-Budget` — accepts an integer (tokens) or one of the effort labels.
 4. Environment variable `DEFAULT_THINKING_BUDGET` — server-wide default.
 
-Effort labels map to token budgets: `off` = disabled, `low` = 5000, `medium` = 10000, `high` = 32000, `max` = 64000.
+Effort labels map to token budgets: `off` = disabled, `low` = 5000, `medium` = 10000, `high` = 32000, `xhigh` = 48000, `max` = 64000.
+On older Claude CLI builds, `xhigh` falls back to `max`.
 
 ### When to use `DEFAULT_THINKING_BUDGET`
 

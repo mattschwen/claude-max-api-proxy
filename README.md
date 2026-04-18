@@ -5,17 +5,6 @@
   <img alt="Claw Proxy - cyberpunk OpenAI-compatible gateway powered by Claude Code CLI." src="./assets/banner-light.svg" width="100%">
 </picture>
 
-<br/>
-
-<pre>
-[ CLAW PROXY // LOCALHOST RELAY // CLAUDE MAX ]
-  CCCC   L         A      W     W    PPPP   RRRR    OOO   X   X  Y   Y
- C       L        A A     W     W    P   P  R   R  O   O   X X    Y Y
- C       L       AAAAA    W  W  W    PPPP   RRRR   O   O    X      Y
- C       L       A   A    W WWW W    P      R R    O   O   X X     Y
-  CCCC   LLLLL   A   A     WW WW     P      R  RR   OOO   X   X    Y
-</pre>
-
 <p>
   <b>Claw Proxy</b> is the cyberpunk face of
   <code>claude-max-api-proxy</code>.
@@ -118,7 +107,7 @@ surface.
 | Zero extra credentials | Reuses the machine's existing `claude auth login` session instead of asking clients for a second API key. |
 | Dynamic model routing | Probes stable families like `sonnet`, `opus`, and `haiku`, then surfaces the exact model IDs your local Claude CLI currently resolves. |
 | Session continuity | Reuses the OpenAI `user` field as a conversation key and resumes the underlying CLI session automatically. |
-| Operational discipline | Warm subprocess pool, per-family stall timeouts, kill escalation, structured logs, and a detailed `/health` snapshot. |
+| Operational discipline | CLI warm-up loop, per-family stall timeouts, kill escalation, structured logs, and a detailed `/health` snapshot. |
 | Sensible deployment | Plain Node.js checkout first. Docker supported, but optional. macOS and Linux service docs included. |
 
 ## Jack In
@@ -213,7 +202,7 @@ curl -N http://127.0.0.1:3456/v1/chat/completions \
 | Setting | Value |
 | --- | --- |
 | Base URL | `http://127.0.0.1:3456/v1` |
-| API key | any non-empty string |
+| API key | any non-empty string if your client requires one |
 | Model | `sonnet`, `opus`, `haiku`, or an exact ID from `/v1/models` |
 
 The proxy accepts stable family aliases and resolves them to whatever exact

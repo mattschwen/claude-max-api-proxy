@@ -89,13 +89,13 @@
   </g>
 
   <g transform="translate(352 0)">
-    <g transform="translate(0 78)">
-      <rect x="0" y="0" width="154" height="28" rx="14" fill="#ffffff" fill-opacity="0.86" stroke="#14bfff" stroke-opacity="0.36" stroke-width="1.2"/>
-      <text x="15" y="19" font-family="ui-monospace, Menlo, Monaco, monospace" font-size="12" fill="#125a85" letter-spacing="1">NEON://LOCALHOST:3456</text>
+    <g transform="translate(0 74)">
+      <rect x="0" y="0" width="202" height="30" rx="15" fill="#ffffff" fill-opacity="0.86" stroke="#14bfff" stroke-opacity="0.36" stroke-width="1.2"/>
+      <text x="16" y="20" font-family="ui-monospace, Menlo, Monaco, monospace" font-size="11.5" fill="#125a85" letter-spacing="0.8">NEON://LOCALHOST:3456</text>
     </g>
-    <g transform="translate(168 78)">
-      <rect x="0" y="0" width="158" height="28" rx="14" fill="#ffffff" fill-opacity="0.86" stroke="#ff3fb0" stroke-opacity="0.36" stroke-width="1.2"/>
-      <text x="16" y="19" font-family="ui-monospace, Menlo, Monaco, monospace" font-size="12" fill="#8d1f69" letter-spacing="1">CLAUDE MAX SESSION</text>
+    <g transform="translate(218 74)">
+      <rect x="0" y="0" width="210" height="30" rx="15" fill="#ffffff" fill-opacity="0.86" stroke="#ff3fb0" stroke-opacity="0.36" stroke-width="1.2"/>
+      <text x="16" y="20" font-family="ui-monospace, Menlo, Monaco, monospace" font-size="11.5" fill="#8d1f69" letter-spacing="0.8">CLAUDE MAX SESSION</text>
     </g>
 
     <text x="0" y="166" font-family="ui-sans-serif, 'Segoe UI', sans-serif" font-size="78" font-weight="800" letter-spacing="2" fill="url(#title)">CLAW PROXY</text>

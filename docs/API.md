@@ -100,7 +100,7 @@ curl http://127.0.0.1:3456/health
 | `status` | `"ok"` means the server bound and is accepting traffic. Does **not** imply models are usable — check `models.available`. |
 | `auth.loggedIn` | `false` means the Claude CLI on this machine is not authenticated — chat requests will fail. |
 | `models.available` | If this array is empty, every chat request will fail with `no_models_available`. |
-| `pool.isWarm` | Cold pool means the first few requests will spawn fresh `claude` processes and be slower. |
+| `pool.isWarm` | `false` means the CLI warm-up loop has gone idle; the next request may pay extra CLI/auth startup latency. |
 | `queues` | Long per-conversation queues indicate a stuck request or a client spamming the same conversation key. |
 | `stallDetections` | If this increments, the subprocess output stream is going idle mid-response. See [TROUBLESHOOTING](./TROUBLESHOOTING.md). |
 
@@ -207,12 +207,15 @@ Response is a Server-Sent Events stream of OpenAI-shaped `chat.completion.chunk`
 
 ### Extended thinking
 
-Opus models support extended thinking through any of these inputs:
+The proxy accepts extended-thinking inputs through any of these inputs:
 
 - request body `thinking.budget_tokens`
-- request body `reasoning_effort`
-- request header `X-Thinking-Budget`
+- request body `reasoning_effort` (`off`, `low`, `medium`, `high`, `xhigh`, `max`)
+- request header `X-Thinking-Budget` (integer tokens or the same effort labels)
 - server default `DEFAULT_THINKING_BUDGET`
+
+`xhigh` maps to an intermediate 48000-token tier when the installed Claude CLI
+supports it. On older Claude CLI builds, the proxy falls back to `max`.
 
 Example using the standard `thinking` field:
 
