@@ -16,7 +16,7 @@
  * Design
  * ------
  * - Exposes `runGated(fn)` that runs `fn()` through a promise-chained mutex
- *   ONLY when `now` falls inside `[expiresAt - 10min, expiresAt + 2min]`.
+ *   ONLY when `now` falls inside `[expiresAt - 30min, expiresAt + 5min]`.
  * - Outside that window we take the fast path (no serialization overhead).
  * - Credentials file is re-read on every call so refreshes performed by the
  *   CLI are visible immediately.

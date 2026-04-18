@@ -10,6 +10,7 @@ import { tokenGate } from "./auth/token-gate.js";
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 10000;
 const PROBE_PROMPT = "Reply with exactly: OK";
+const XHIGH_MIN_VERSION = { major: 2, minor: 1, patch: 112 } as const;
 
 const CLEAN_CLAUDE_ENV = (() => {
   const env = { ...process.env };
@@ -19,6 +20,9 @@ const CLEAN_CLAUDE_ENV = (() => {
   delete env.CLAUDE_CODE_PARENT;
   return env;
 })();
+
+let cachedClaudeVersion = process.env.CLAUDE_PROXY_CLAUDE_VERSION?.trim()
+  || undefined;
 
 export interface ClaudeCommandResult {
   stdout: string;
@@ -51,6 +55,39 @@ export interface ModelProbeResult {
 
 export function getCleanClaudeEnv(): NodeJS.ProcessEnv {
   return { ...CLEAN_CLAUDE_ENV };
+}
+
+export interface ClaudeCliVersion {
+  major: number;
+  minor: number;
+  patch: number;
+}
+
+export function parseClaudeVersion(
+  raw: string | undefined,
+): ClaudeCliVersion | null {
+  const match = raw?.match(/(\d+)\.(\d+)\.(\d+)/);
+  if (!match) return null;
+  return {
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3]),
+  };
+}
+
+export function supportsXHighEffort(
+  version: string | undefined = cachedClaudeVersion,
+): boolean {
+  const parsed = parseClaudeVersion(version);
+  if (!parsed) return false;
+
+  if (parsed.major !== XHIGH_MIN_VERSION.major) {
+    return parsed.major > XHIGH_MIN_VERSION.major;
+  }
+  if (parsed.minor !== XHIGH_MIN_VERSION.minor) {
+    return parsed.minor > XHIGH_MIN_VERSION.minor;
+  }
+  return parsed.patch >= XHIGH_MIN_VERSION.patch;
 }
 
 export function parseClaudeJsonOutput(raw: string): ClaudeCliMessage[] {
@@ -271,8 +308,11 @@ export async function verifyClaude(): Promise<{
 }> {
   const result = await runClaudeCommand(["--version"], 5000);
   if (result.code === 0) {
-    return { ok: true, version: result.stdout.trim() };
+    const version = result.stdout.trim();
+    cachedClaudeVersion = version || undefined;
+    return { ok: true, version };
   }
+  cachedClaudeVersion = undefined;
   return {
     ok: false,
     error:

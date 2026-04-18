@@ -6,6 +6,8 @@ import {
   extractClaudeErrorFromResult,
   parseAuthStatus,
   parseClaudeJsonOutput,
+  parseClaudeVersion,
+  supportsXHighEffort,
 } from "./claude-cli.inspect.js";
 import type { ClaudeCliMessage, ClaudeCliResult } from "./types/claude-cli.js";
 
@@ -121,4 +123,20 @@ test("classifyClaudeError maps passthrough Anthropic auth payloads", () => {
       `expected auth_required for: ${msg}`,
     );
   }
+});
+
+test("parseClaudeVersion extracts semver from Claude CLI output", () => {
+  assert.deepEqual(parseClaudeVersion("claude 2.1.112"), {
+    major: 2,
+    minor: 1,
+    patch: 112,
+  });
+  assert.equal(parseClaudeVersion("Claude Code CLI"), null);
+});
+
+test("supportsXHighEffort only enables xhigh on supported CLI versions", () => {
+  assert.equal(supportsXHighEffort("claude 2.1.111"), false);
+  assert.equal(supportsXHighEffort("claude 2.1.112"), true);
+  assert.equal(supportsXHighEffort("claude 2.2.0"), true);
+  assert.equal(supportsXHighEffort(undefined), false);
 });

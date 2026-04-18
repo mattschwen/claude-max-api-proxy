@@ -25,6 +25,7 @@ import type { ClaudeModel } from "../adapter/openai-to-cli.js";
 import { log } from "../logger.js";
 import {
   getCleanClaudeEnv,
+  supportsXHighEffort,
   verifyClaude,
   verifyAuth,
 } from "../claude-cli.inspect.js";
@@ -99,10 +100,13 @@ export const subprocessRegistry = new SubprocessRegistry();
  * Thresholds chosen to line up with the REASONING_EFFORT_MAP in routes.ts:
  *   low = 5000, medium = 10000, high = 32000, xhigh = 48000, max = 64000
  */
-function thinkingBudgetToEffort(budget: number): string | undefined {
+export function thinkingBudgetToEffort(
+  budget: number,
+  xhighSupported = supportsXHighEffort(),
+): string | undefined {
   if (!Number.isFinite(budget) || budget <= 0) return undefined;
   if (budget > 48000) return "max";
-  if (budget > 32000) return "xhigh";
+  if (budget > 32000) return xhighSupported ? "xhigh" : "max";
   if (budget > 10000) return "high";
   if (budget > 5000) return "medium";
   return "low";

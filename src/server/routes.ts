@@ -77,7 +77,7 @@ function parseEffortOrTokens(raw: string): number | undefined {
 /**
  * Resolve thinking budget from multiple sources in priority order:
  *   1. Request body `thinking.budget_tokens` (Anthropic style — explicit)
- *   2. Request body `reasoning_effort` (OpenAI style — "off" | "low" | "medium" | "high" | "max")
+ *   2. Request body `reasoning_effort` (OpenAI style — "off" | "low" | "medium" | "high" | "xhigh" | "max")
  *   3. Request header `X-Thinking-Budget` (simple client override)
  *   4. Environment variable `DEFAULT_THINKING_BUDGET` (server default)
  *

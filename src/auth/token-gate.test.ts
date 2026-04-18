@@ -17,7 +17,7 @@ function makeTempCredsPath(suffix: string): string {
 
 test("TokenGate: fast-paths (runs concurrently) outside refresh window", async () => {
   const credsPath = makeTempCredsPath("outside");
-  // expiresAt 1h in the future; window is [-10min, +2min], so we are WAY
+  // expiresAt 1h in the future; window is [-30min, +5min], so we are WAY
   // outside it and the gate should not serialize.
   const now = 1_000_000_000_000;
   writeCreds(credsPath, now + 60 * 60 * 1000);
@@ -64,7 +64,7 @@ test("TokenGate: fast-paths (runs concurrently) outside refresh window", async (
 test("TokenGate: serializes concurrent calls inside refresh window", async () => {
   const credsPath = makeTempCredsPath("inside");
   // Put `now` 2 minutes BEFORE expiresAt, which is inside the default
-  // [expiresAt - 10min, expiresAt + 2min] refresh window.
+  // [expiresAt - 30min, expiresAt + 5min] refresh window.
   const now = 1_000_000_000_000;
   writeCreds(credsPath, now + 2 * 60 * 1000);
 

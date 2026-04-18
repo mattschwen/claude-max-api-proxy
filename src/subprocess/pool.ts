@@ -7,9 +7,13 @@ import { spawn } from "child_process";
 import { getCleanClaudeEnv } from "../claude-cli.inspect.js";
 import { tokenGate } from "../auth/token-gate.js";
 import { log, logError } from "../logger.js";
+import { createEscalatedStop } from "./stop-with-escalation.js";
 
 const POOL_SIZE = 5;
 const WARMUP_INTERVAL_MS = 30 * 1000;
+const WARM_DEEP_TIMEOUT_MS = 10_000;
+const WARM_DEEP_KILL_GRACE_MS = 5_000;
+const WARM_DEEP_FORCE_RELEASE_MS = 1_000;
 // Only log warm success when the duration spikes past this threshold. The
 // per-cycle happy-path success fires every 30s and has zero diagnostic
 // value — it buried structured events in `docker logs`.
@@ -89,31 +93,23 @@ class SubprocessPool {
               ],
               { stdio: "pipe", env: getCleanClaudeEnv() },
             );
-            let done = false;
-            const finish = (): void => {
-              if (done) return;
-              done = true;
-              try {
-                proc.kill();
-              } catch {
-                /* ignore */
-              }
-              // proc.kill() does not guarantee immediate exit — wait for the
-              // real close event before releasing the gate.
-            };
-            // Only release the gate on actual process exit/error so the
-            // mutex is held for the full lifetime of this refresh-capable
-            // spawn.
-            proc.on("close", () => {
-              done = true;
-              resolve();
+            const stopper = createEscalatedStop(
+              proc,
+              resolve,
+              WARM_DEEP_KILL_GRACE_MS,
+              WARM_DEEP_FORCE_RELEASE_MS,
+            );
+            const timeoutId = setTimeout(
+              stopper.requestStop,
+              WARM_DEEP_TIMEOUT_MS,
+            );
+            const clearTimeouts = (): void => clearTimeout(timeoutId);
+            proc.once("close", clearTimeouts);
+            proc.once("error", () => {
+              clearTimeouts();
+              stopper.settle();
             });
-            proc.on("error", () => {
-              done = true;
-              resolve();
-            });
-            proc.stdout?.on("data", finish);
-            setTimeout(finish, 10000);
+            proc.stdout?.on("data", stopper.requestStop);
           } catch {
             resolve();
           }

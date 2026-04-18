@@ -29,6 +29,7 @@ const DEFAULT_FAMILY_ORDER: ModelFamily[] = ["sonnet", "opus", "haiku"];
 // and the subprocess pool re-warms, which is enough to escape most stuck
 // states without manual `make restart`.
 const AUTH_SELF_EXIT_THRESHOLD = 5;
+const AUTH_SELF_EXIT_DELAY_MS = 250;
 
 export interface ModelAvailabilitySnapshot {
   checkedAt: number;
@@ -50,11 +51,30 @@ function pickDefaultModel(
   return available[0] ?? null;
 }
 
-class ModelAvailabilityManager {
+interface ModelAvailabilityDeps {
+  verifyAuth: typeof verifyAuth;
+  probeModelAvailability: typeof probeModelAvailability;
+  getModelDefinitions: typeof getModelDefinitions;
+  exitProcess: (code: number) => void;
+}
+
+const defaultDeps: ModelAvailabilityDeps = {
+  verifyAuth,
+  probeModelAvailability,
+  getModelDefinitions,
+  exitProcess: (code) => {
+    process.exit(code);
+  },
+};
+
+export class ModelAvailabilityManager {
   private snapshot: ModelAvailabilitySnapshot | null = null;
   private refreshPromise: Promise<ModelAvailabilitySnapshot> | null = null;
   private lastAuthRetryAt = 0;
   private consecutiveAuthFailures = 0;
+  private selfExitTimer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(private readonly deps: ModelAvailabilityDeps = defaultDeps) {}
 
   getCachedSnapshot(): ModelAvailabilitySnapshot | null {
     return this.snapshot;
@@ -71,6 +91,23 @@ class ModelAvailabilityManager {
 
   invalidate(): void {
     this.snapshot = null;
+  }
+
+  private scheduleSelfExit(): void {
+    if (this.selfExitTimer) return;
+    this.selfExitTimer = setTimeout(() => {
+      this.selfExitTimer = null;
+      this.deps.exitProcess(1);
+    }, AUTH_SELF_EXIT_DELAY_MS);
+    if (typeof this.selfExitTimer.unref === "function") {
+      this.selfExitTimer.unref();
+    }
+  }
+
+  private clearSelfExit(): void {
+    if (!this.selfExitTimer) return;
+    clearTimeout(this.selfExitTimer);
+    this.selfExitTimer = null;
   }
 
   /**
@@ -152,8 +189,8 @@ class ModelAvailabilityManager {
   }
 
   private async refresh(): Promise<ModelAvailabilitySnapshot> {
-    const authResult = await verifyAuth();
-    const definitions = getModelDefinitions();
+    const authResult = await this.deps.verifyAuth();
+    const definitions = this.deps.getModelDefinitions();
 
     if (!authResult.ok) {
       this.consecutiveAuthFailures += 1;
@@ -164,9 +201,8 @@ class ModelAvailabilityManager {
           message:
             "verifyAuth failed consecutively; exiting so the container restarts and re-reads credentials",
         });
-        // Let Docker's restart policy bring us back. Small delay so the log
-        // has a chance to flush before the process dies.
-        setTimeout(() => process.exit(1), 250);
+        // Small delay so the log has a chance to flush before the process dies.
+        this.scheduleSelfExit();
       }
       return {
         checkedAt: Date.now(),
@@ -185,11 +221,12 @@ class ModelAvailabilityManager {
     }
 
     this.consecutiveAuthFailures = 0;
+    this.clearSelfExit();
 
     const probes = await Promise.all(
       definitions.map(async (definition) => ({
         definition,
-        result: await probeModelAvailability(definition.id),
+        result: await this.deps.probeModelAvailability(definition.id),
       })),
     );
 
