@@ -53,7 +53,7 @@ The server binds to `http://127.0.0.1:3456`.
    ```
 2. Make your changes in `src/`. `dist/` is a build artifact — don't hand-edit it.
 3. Run the local check suite: `npm run ci`
-4. Exercise the change manually with `curl` against a running server when behavior changes (see examples in [`docs/API.md`](./docs/API.md)).
+4. Exercise the change manually with `curl` against a running server when behavior changes (see examples in [`API.md`](./API.md)).
 5. If you change setup, configuration, or deployment behavior, update the affected docs in the same PR (`README.md`, `docs/*`, `.env.example`, and any GitHub templates/workflows).
 6. Commit with a descriptive message (see [commit messages](#commit-messages)).
 7. Push and open a PR. GitHub Actions runs the same build-and-test checks on pushes and pull requests.
@@ -116,7 +116,7 @@ Please include:
 - Operating system and version
 - Exact reproduction steps
 - Full error messages, including stack traces
-- Relevant log excerpts (filter for your `conversationId` — see [docs/TROUBLESHOOTING.md](./docs/TROUBLESHOOTING.md#log-diving))
+- Relevant log excerpts (filter for your `conversationId` — see [TROUBLESHOOTING.md](./TROUBLESHOOTING.md#log-diving))
 - `/health` payload at time of the bug (redact email / org name if you prefer)
 
 ## Security issues
@@ -129,4 +129,4 @@ Participation in this project is governed by [CODE_OF_CONDUCT.md](./CODE_OF_COND
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the [MIT License](./LICENSE).
+By contributing, you agree that your contributions will be licensed under the [MIT License](../LICENSE).
