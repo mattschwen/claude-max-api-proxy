@@ -140,6 +140,22 @@ Watch for `subprocess.stall` and `subprocess.kill` events in the log. If you're 
 
 Intentional. When the HTTP client closes the SSE connection, the proxy immediately kills the underlying subprocess so the conversation queue can unblock. If you want the request to finish even after disconnect, don't close the stream.
 
+### Client fires its own "no stream activity" watchdog during long Claude thinking
+
+Some OpenAI-compatible clients (notably the OpenClaw TUI, which uses a 30 s `streamingWatchdogMs` by default) run their own per-request watchdog that fires if they haven't seen a content chunk in N seconds. When Claude legitimately goes quiet during deep reasoning or tool execution, these client watchdogs trip and surface a misleading "the backend dropped this run silently" message even though the proxy is still happily streaming.
+
+This is a client-side false positive, not a proxy failure. The proxy's activity-based stall detection (Haiku 45 s / Sonnet 90 s / Opus 120 s, above) is the authoritative source of truth: if the run has actually stalled, the proxy kills the subprocess and sends a `finish_reason` that cleanly ends the stream for the client.
+
+Why the proxy can't paper over this itself:
+
+- SSE comment keepalives (`:keepalive\n\n`) are stripped by spec-compliant SSE parsers before the chunk ever reaches the client's event handler.
+- OpenAI-format "empty" chunks (`delta: {}` or `delta: { content: "" }`) are dropped by virtually every OpenAI stream consumer — they require a non-empty `content`, `reasoning_content`, or `tool_calls` field to dispatch an event. Emitting visible-content heartbeats would pollute the assistant message.
+
+**Fix, in order of preference:**
+
+1. Raise or disable the client's watchdog. For OpenClaw: there is currently no config knob for `streamingWatchdogMs`, so you have to patch `DEFAULT_STREAMING_WATCHDOG_MS` in the installed `dist/tui-*.js` bundle (30 s → 10 min is a reasonable default since the proxy's own stall detection supersedes it).
+2. If the client exposes a config knob, set it to something well above the proxy's hard timeouts (Haiku 2 min / Sonnet 10 min / Opus 30 min).
+
 ---
 
 ## Same-conversation weirdness
@@ -187,15 +203,15 @@ lsof -iTCP:3456 -sTCP:LISTEN
 
 The proxy emits one JSON object per line to stdout. To filter for a specific event:
 
+The following examples assume you're running under `launchd` on macOS with the LaunchAgent from [macos-setup.md](./macos-setup.md), which writes logs to `~/Library/Logs/claude-max-api-proxy.log` (and `.err.log`). If you're running in the foreground (`npm start`), substitute stdout/stderr for the tail commands.
+
 ```bash
 # Every request completion
-tail -f /tmp/claude-max-api-proxy.log | grep '"event":"request.complete"'
+tail -f "$HOME/Library/Logs/claude-max-api-proxy.log" | grep '"event":"request.complete"'
 
 # Every stall
-tail -f /tmp/claude-max-api-proxy.log | grep '"event":"subprocess.stall"'
+tail -f "$HOME/Library/Logs/claude-max-api-proxy.log" | grep '"event":"subprocess.stall"'
 
 # Everything for one conversation
-tail -f /tmp/claude-max-api-proxy.log | grep '"conversationId":"chat-abc-123"'
+tail -f "$HOME/Library/Logs/claude-max-api-proxy.log" | grep '"conversationId":"chat-abc-123"'
 ```
-
-If you're running under `launchd` on macOS, logs go to `/tmp/claude-max-api-proxy.log` and `/tmp/claude-max-api-proxy.err.log` per the LaunchAgent config in [macos-setup.md](./macos-setup.md).
