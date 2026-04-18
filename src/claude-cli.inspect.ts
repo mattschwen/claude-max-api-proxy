@@ -7,9 +7,12 @@ import type {
   ClaudeCliResult,
 } from "./types/claude-cli.js";
 import { tokenGate } from "./auth/token-gate.js";
+import { createEscalatedStop } from "./subprocess/stop-with-escalation.js";
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 10000;
 const PROBE_PROMPT = "Reply with exactly: OK";
+const COMMAND_KILL_GRACE_MS = 5000;
+const COMMAND_FORCE_RELEASE_MS = 1000;
 const XHIGH_MIN_VERSION = { major: 2, minor: 1, patch: 112 } as const;
 
 const CLEAN_CLAUDE_ENV = (() => {
@@ -270,14 +273,32 @@ export async function runClaudeCommand(
         let stdout = "";
         let stderr = "";
         let timedOut = false;
+        let code: number | null = null;
+        let signal: NodeJS.Signals | null = null;
+        let settled = false;
+
+        const finalize = (): void => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeoutId);
+          resolve({ stdout, stderr, code, signal, timedOut });
+        };
+
+        proc.on("close", (closeCode, closeSignal) => {
+          code = closeCode;
+          signal = closeSignal;
+        });
+
+        const stopper = createEscalatedStop(
+          proc,
+          finalize,
+          COMMAND_KILL_GRACE_MS,
+          COMMAND_FORCE_RELEASE_MS,
+        );
 
         const timeoutId = setTimeout(() => {
           timedOut = true;
-          try {
-            proc.kill("SIGTERM");
-          } catch {
-            // ignore
-          }
+          stopper.requestStop();
         }, timeoutMs);
 
         proc.stdout?.on("data", (chunk: Buffer) => {
@@ -289,13 +310,7 @@ export async function runClaudeCommand(
         });
 
         proc.on("error", () => {
-          clearTimeout(timeoutId);
-          resolve({ stdout, stderr, code: null, signal: null, timedOut });
-        });
-
-        proc.on("close", (code, signal) => {
-          clearTimeout(timeoutId);
-          resolve({ stdout, stderr, code, signal, timedOut });
+          stopper.settle();
         });
       }),
   );

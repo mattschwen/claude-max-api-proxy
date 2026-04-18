@@ -43,3 +43,19 @@ test("createEscalatedStop settles once when the process closes after SIGTERM", a
   assert.deepEqual(proc.kills, ["SIGTERM"]);
   assert.equal(settled, 1);
 });
+
+test("createEscalatedStop settle is idempotent after an explicit error path", async () => {
+  const proc = new FakeProcess();
+  let settled = 0;
+  const stopper = createEscalatedStop(proc, () => {
+    settled++;
+  }, 20, 20);
+
+  stopper.settle();
+  stopper.settle();
+
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  assert.equal(settled, 1);
+  assert.deepEqual(proc.kills, []);
+});
