@@ -99,10 +99,12 @@ export function validateTokens(
 /**
  * Convert Claude CLI result to OpenAI non-streaming response
  */
-export function cliResultToOpenai(result: ClaudeCliResult, requestId: string): OpenAIChatResponse {
-  const modelName = result.modelUsage
-    ? Object.keys(result.modelUsage)[0]
-    : "claude-sonnet-4";
+export function cliResultToOpenai(
+  result: ClaudeCliResult,
+  requestId: string,
+  fallbackModel = "sonnet",
+): OpenAIChatResponse {
+  const modelName = Object.keys(result.modelUsage || {})[0] || fallbackModel;
 
   return {
     id: `chatcmpl-${requestId}`,

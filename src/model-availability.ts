@@ -5,9 +5,11 @@ import {
   type ClaudeProxyError,
 } from "./claude-cli.inspect.js";
 import {
+  createModelDefinition,
   getModelDefinitions,
   getModelList,
   resolveModelFamily,
+  stripModelProviderPrefix,
   type ModelDefinition,
   type ModelFamily,
 } from "./models.js";
@@ -166,11 +168,7 @@ export class ModelAvailabilityManager {
       return pickDefaultModel(snapshot.available);
     }
 
-    const normalized = requestedModel.startsWith("maxproxy/")
-      ? requestedModel.slice("maxproxy/".length)
-      : requestedModel.startsWith("claude-code-cli/")
-        ? requestedModel.slice("claude-code-cli/".length)
-        : requestedModel;
+    const normalized = stripModelProviderPrefix(requestedModel);
 
     const exact = snapshot.available.find(
       (definition) => definition.id === normalized,
@@ -226,7 +224,7 @@ export class ModelAvailabilityManager {
     const probes = await Promise.all(
       definitions.map(async (definition) => ({
         definition,
-        result: await this.deps.probeModelAvailability(definition.id),
+        result: await this.deps.probeModelAvailability(definition.alias),
       })),
     );
 
@@ -234,16 +232,21 @@ export class ModelAvailabilityManager {
     const unavailable: ModelAvailabilitySnapshot["unavailable"] = [];
 
     for (const probe of probes) {
+      const resolvedDefinition = createModelDefinition(
+        probe.definition.family,
+        probe.result.resolvedModel || probe.definition.alias,
+      );
+
       if (probe.result.ok) {
-        available.push(probe.definition);
+        available.push(resolvedDefinition);
       } else {
         unavailable.push({
-          definition: probe.definition,
+          definition: resolvedDefinition,
           error: probe.result.error || {
             status: 502,
             type: "server_error",
             code: "claude_cli_error",
-            message: `Claude CLI could not use model '${probe.definition.id}'`,
+            message: `Claude CLI could not use model '${resolvedDefinition.id}'`,
           },
         });
       }

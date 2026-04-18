@@ -7,7 +7,7 @@ import {
 import type { ModelDefinition } from "./models.js";
 
 const definition: ModelDefinition = {
-  id: "claude-sonnet-4-6",
+  id: "sonnet",
   family: "sonnet",
   alias: "sonnet",
   timeoutMs: 1,
@@ -21,10 +21,10 @@ function makeManager(
   let idx = 0;
   return new ModelAvailabilityManager({
     verifyAuth: async () => verifyAuthCalls[Math.min(idx++, verifyAuthCalls.length - 1)](),
-    probeModelAvailability: async () => ({
+    probeModelAvailability: async (model) => ({
       ok: true,
-      model: definition.id,
-      resolvedModel: definition.id,
+      model,
+      resolvedModel: "claude-sonnet-4-7",
     }),
     getModelDefinitions: () => [definition],
     exitProcess: (code: number) => {
@@ -54,7 +54,7 @@ test("ModelAvailabilityManager cancels a scheduled self-exit after auth recovery
 
   const recovered = (await manager.getSnapshot(true)) as ModelAvailabilitySnapshot;
   assert.equal(manager.getConsecutiveAuthFailures(), 0);
-  assert.deepEqual(recovered.available.map((model) => model.id), [definition.id]);
+  assert.deepEqual(recovered.available.map((model) => model.id), ["claude-sonnet-4-7"]);
 
   await new Promise((resolve) => setTimeout(resolve, 350));
   assert.deepEqual(exits, []);
@@ -79,4 +79,31 @@ test("ModelAvailabilityManager exits after sustained auth failure", async () => 
 
   await new Promise((resolve) => setTimeout(resolve, 350));
   assert.deepEqual(exits, [1]);
+});
+
+test("ModelAvailabilityManager resolves older versioned requests to the current available family model", async () => {
+  const exits: number[] = [];
+  const manager = makeManager(
+    [async () => ({ ok: true, status: { loggedIn: true } })],
+    exits,
+  );
+
+  const resolved = await manager.resolveRequestedModel(
+    "claude-max-api-proxy/claude-sonnet-4-6",
+  );
+
+  assert.equal(resolved?.id, "claude-sonnet-4-7");
+  assert.equal(resolved?.family, "sonnet");
+});
+
+test("ModelAvailabilityManager publishes resolved runtime model ids", async () => {
+  const exits: number[] = [];
+  const manager = makeManager(
+    [async () => ({ ok: true, status: { loggedIn: true } })],
+    exits,
+  );
+
+  const publicModels = await manager.getPublicModelList();
+
+  assert.deepEqual(publicModels.map((model) => model.id), ["claude-sonnet-4-7"]);
 });

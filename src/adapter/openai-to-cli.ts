@@ -82,7 +82,7 @@ export function extractLastUserMessage(messages: OpenAIChatMessage[]): string {
  * Convert OpenAI chat request to CLI input format
  */
 export function openaiToCli(request: OpenAIChatRequest, isResume = false, cliModel?: ClaudeModel): CliInput {
-  const resolvedModel = cliModel || request.model || "claude-sonnet-4";
+  const resolvedModel = cliModel || request.model || "sonnet";
 
   if (isResume) {
     return {

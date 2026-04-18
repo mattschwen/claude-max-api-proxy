@@ -104,7 +104,7 @@ curl http://127.0.0.1:3456/v1/models
 
 curl -N http://127.0.0.1:3456/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"claude-sonnet-4-6","stream":true,"messages":[{"role":"user","content":"hi"}]}'
+  -d '{"model":"sonnet","stream":true,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
 ## Reporting bugs

@@ -722,7 +722,7 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
     const cleanup = new CleanupSet();
 
     let isFirst = true;
-    let lastModel = "claude-sonnet-4";
+    let lastModel = cliInput.model;
     let isComplete = false;
     let fullResponse = "";
     let clientDisconnected = false;
@@ -1397,7 +1397,7 @@ async function runNonStreamingSubprocess(
         }
 
         if (!res.headersSent) {
-          res.json(cliResultToOpenai(finalResult, requestId));
+          res.json(cliResultToOpenai(finalResult, requestId, cliInput.model));
         }
       } else if (!res.headersSent) {
         res.status(500).json({

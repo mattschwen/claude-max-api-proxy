@@ -1,9 +1,10 @@
 /**
- * Central model registry
+ * Central model registry.
  *
- * Single source of truth for supported models, CLI aliases, timeouts,
- * and the /v1/models endpoint. Add new models here — everything else
- * derives from this list.
+ * The Claude CLI owns the exact versioned model IDs (for example
+ * `claude-sonnet-<resolved-by-cli>`). This module only owns stable family metadata:
+ * aliases, timeout policy, and provider-prefix normalization. Runtime model
+ * probing resolves the current exact IDs dynamically.
  */
 
 export type ModelFamily = "opus" | "sonnet" | "haiku";
@@ -17,76 +18,23 @@ export interface ModelDefinition {
   stallTimeoutMs: number;
 }
 
-/**
- * Each entry: { id, family, alias, timeoutMs, stallTimeoutMs }
- *   id             – OpenAI-compatible model name (what clients send)
- *   family         – model family for grouping (opus, sonnet, haiku)
- *   alias          – CLI --model value
- *   timeoutMs      – absolute wall-clock timeout
- *   stallTimeoutMs – activity timeout (resets on each content_delta)
- */
 const MODEL_DEFINITIONS: ModelDefinition[] = [
-  // Opus — current model first (becomes canonical via CANONICAL_IDS)
   {
-    id: "claude-opus-4-7",
-    family: "opus",
-    alias: "opus",
-    timeoutMs: 1800000,
-    stallTimeoutMs: 120000,
-  },
-  {
-    id: "claude-opus-4-6",
-    family: "opus",
-    alias: "opus",
-    timeoutMs: 1800000,
-    stallTimeoutMs: 120000,
-  },
-  {
-    id: "claude-opus-4",
-    family: "opus",
-    alias: "opus",
-    timeoutMs: 1800000,
-    stallTimeoutMs: 120000,
-  },
-  {
-    id: "claude-opus-4-5",
-    family: "opus",
-    alias: "opus",
-    timeoutMs: 1800000,
-    stallTimeoutMs: 120000,
-  },
-  // Sonnet — current model first
-  {
-    id: "claude-sonnet-4-6",
+    id: "sonnet",
     family: "sonnet",
     alias: "sonnet",
     timeoutMs: 600000,
     stallTimeoutMs: 90000,
   },
   {
-    id: "claude-sonnet-4",
-    family: "sonnet",
-    alias: "sonnet",
-    timeoutMs: 600000,
-    stallTimeoutMs: 90000,
+    id: "opus",
+    family: "opus",
+    alias: "opus",
+    timeoutMs: 1800000,
+    stallTimeoutMs: 120000,
   },
   {
-    id: "claude-sonnet-4-5",
-    family: "sonnet",
-    alias: "sonnet",
-    timeoutMs: 600000,
-    stallTimeoutMs: 90000,
-  },
-  // Haiku — current model first
-  {
-    id: "claude-haiku-4-5",
-    family: "haiku",
-    alias: "haiku",
-    timeoutMs: 120000,
-    stallTimeoutMs: 45000,
-  },
-  {
-    id: "claude-haiku-4",
+    id: "haiku",
     family: "haiku",
     alias: "haiku",
     timeoutMs: 120000,
@@ -95,49 +43,46 @@ const MODEL_DEFINITIONS: ModelDefinition[] = [
 ];
 
 // Provider prefixes that clients may prepend
-const PROVIDER_PREFIXES = [
+export const PROVIDER_PREFIXES = [
   "maxproxy/",
   "claude-code-cli/",
   "claude-max-api-proxy/",
 ];
 
-interface ModelLookupEntry {
-  id: string;
-  family: ModelFamily;
-  alias: string;
-  timeoutMs: number;
-  stallTimeoutMs: number;
+const FAMILY_PATTERNS: Record<ModelFamily, RegExp> = {
+  opus: /(?:^|[/:._-])opus(?:$|[/:._-])/i,
+  sonnet: /(?:^|[/:._-])sonnet(?:$|[/:._-])/i,
+  haiku: /(?:^|[/:._-])haiku(?:$|[/:._-])/i,
+};
+
+function getModelConfig(family: ModelFamily): ModelDefinition {
+  const definition = MODEL_DEFINITIONS.find((entry) => entry.family === family);
+  if (!definition) {
+    throw new Error(`Unknown model family: ${family}`);
+  }
+  return definition;
 }
 
-// Build lookup map: model string -> { alias, timeoutMs, stallTimeoutMs }
-const MODEL_LOOKUP = new Map<string, ModelLookupEntry>();
-
-for (const def of MODEL_DEFINITIONS) {
-  const entry: ModelLookupEntry = {
-    id: def.id,
-    family: def.family,
-    alias: def.alias,
-    timeoutMs: def.timeoutMs,
-    stallTimeoutMs: def.stallTimeoutMs,
-  };
-  MODEL_LOOKUP.set(def.id, entry);
-  for (const prefix of PROVIDER_PREFIXES) {
-    MODEL_LOOKUP.set(prefix + def.id, entry);
-  }
+function getModelConfigForName(model: string): ModelDefinition | null {
+  const family = resolveModelFamily(model);
+  return family ? getModelConfig(family) : null;
 }
 
-// Bare aliases: "opus" -> opus, "sonnet" -> sonnet, "haiku" -> haiku
-for (const family of ["opus", "sonnet", "haiku"] as const) {
-  const def = MODEL_DEFINITIONS.find((d) => d.family === family);
-  if (def) {
-    MODEL_LOOKUP.set(family, {
-      id: def.id,
-      family: def.family,
-      alias: def.alias,
-      timeoutMs: def.timeoutMs,
-      stallTimeoutMs: def.stallTimeoutMs,
-    });
+export function stripModelProviderPrefix(model: string): string {
+  let stripped = (model || "").trim();
+  let changed = true;
+
+  while (changed && stripped) {
+    changed = false;
+    for (const prefix of PROVIDER_PREFIXES) {
+      if (stripped.startsWith(prefix)) {
+        stripped = stripped.slice(prefix.length).trim();
+        changed = true;
+      }
+    }
   }
+
+  return stripped;
 }
 
 /**
@@ -145,36 +90,40 @@ for (const family of ["opus", "sonnet", "haiku"] as const) {
  * Returns null if the model is not recognized.
  */
 export function resolveModel(model: string): string | null {
-  const entry = MODEL_LOOKUP.get(model);
-  if (entry) return entry.alias;
-
-  for (const prefix of PROVIDER_PREFIXES) {
-    if (model.startsWith(prefix)) {
-      const stripped = model.slice(prefix.length);
-      const e = MODEL_LOOKUP.get(stripped);
-      if (e) return e.alias;
-    }
-  }
-
-  return null;
+  const definition = getModelConfigForName(model);
+  return definition?.alias ?? null;
 }
 
 /**
  * Resolve a request model string to its model family.
  */
 export function resolveModelFamily(model: string): ModelFamily | null {
-  const entry = MODEL_LOOKUP.get(model);
-  if (entry) return entry.family;
+  const normalized = stripModelProviderPrefix(model).toLowerCase();
+  if (!normalized) return null;
 
-  for (const prefix of PROVIDER_PREFIXES) {
-    if (model.startsWith(prefix)) {
-      const stripped = model.slice(prefix.length);
-      const e = MODEL_LOOKUP.get(stripped);
-      if (e) return e.family;
+  const exact = MODEL_DEFINITIONS.find((definition) => definition.alias === normalized);
+  if (exact) {
+    return exact.family;
+  }
+
+  for (const definition of MODEL_DEFINITIONS) {
+    if (FAMILY_PATTERNS[definition.family].test(normalized)) {
+      return definition.family;
     }
   }
 
   return null;
+}
+
+export function createModelDefinition(
+  family: ModelFamily,
+  modelId?: string,
+): ModelDefinition {
+  const definition = getModelConfig(family);
+  return {
+    ...definition,
+    id: normalizeModelName(modelId ?? definition.alias, family),
+  };
 }
 
 /**
@@ -182,15 +131,8 @@ export function resolveModelFamily(model: string): ModelFamily | null {
  * Falls back to 180s for unknown models.
  */
 export function getModelTimeout(model: string): number {
-  const entry = MODEL_LOOKUP.get(model);
-  if (entry) return entry.timeoutMs;
-
-  const lower = (model || "").toLowerCase();
-  if (lower.includes("opus")) return 1800000;
-  if (lower.includes("haiku")) return 120000;
-  if (lower.includes("sonnet")) return 600000;
-
-  return 180000;
+  const definition = getModelConfigForName(model);
+  return definition?.timeoutMs ?? 180000;
 }
 
 /**
@@ -198,42 +140,29 @@ export function getModelTimeout(model: string): number {
  * Falls back to 60s for unknown models.
  */
 export function getStallTimeout(model: string): number {
-  const entry = MODEL_LOOKUP.get(model);
-  if (entry) return entry.stallTimeoutMs;
-
-  const lower = (model || "").toLowerCase();
-  if (lower.includes("opus")) return 120000;
-  if (lower.includes("haiku")) return 45000;
-  if (lower.includes("sonnet")) return 90000;
-
-  return 90000;
+  const definition = getModelConfigForName(model);
+  return definition?.stallTimeoutMs ?? 90000;
 }
 
 /**
  * Check if a model string is recognized.
  */
 export function isValidModel(model: string): boolean {
-  return resolveModel(model) !== null;
-}
-
-// Canonical ID per family — the "current" model name to return in responses.
-const CANONICAL_IDS: Partial<Record<ModelFamily, string>> = {};
-for (const def of MODEL_DEFINITIONS) {
-  if (!CANONICAL_IDS[def.family]) {
-    CANONICAL_IDS[def.family] = def.id;
-  }
+  return getModelConfigForName(model) !== null;
 }
 
 /**
- * Normalize a CLI-reported model name to a canonical OpenAI-compatible ID.
+ * Normalize a CLI-reported model name for OpenAI responses:
+ * - strip proxy/provider prefixes
+ * - preserve the exact resolved model ID when present
+ * - fall back to the family alias when the caller provided no model name
  */
-export function normalizeModelName(model: string): string {
-  if (!model) return CANONICAL_IDS.sonnet!;
-  const lower = model.toLowerCase();
-  if (lower.includes("opus")) return CANONICAL_IDS.opus!;
-  if (lower.includes("sonnet")) return CANONICAL_IDS.sonnet!;
-  if (lower.includes("haiku")) return CANONICAL_IDS.haiku!;
-  return model;
+export function normalizeModelName(
+  model: string,
+  fallbackFamily: ModelFamily = "sonnet",
+): string {
+  const normalized = stripModelProviderPrefix(model);
+  return normalized || getCanonicalModelId(fallbackFamily);
 }
 
 /**
@@ -251,9 +180,9 @@ export function getModelList(
 }
 
 export function getModelDefinitions(): ModelDefinition[] {
-  return [...MODEL_DEFINITIONS];
+  return MODEL_DEFINITIONS.map((definition) => ({ ...definition }));
 }
 
 export function getCanonicalModelId(family: ModelFamily): string {
-  return CANONICAL_IDS[family]!;
+  return getModelConfig(family).alias;
 }

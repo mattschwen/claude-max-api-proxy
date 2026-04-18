@@ -27,3 +27,12 @@ test("openaiToCli resume mode keeps only the last user message", () => {
   assert.equal(cliInput.prompt, "Second");
   assert.equal(cliInput.systemPrompt, undefined);
 });
+
+test("openaiToCli defaults to the sonnet alias when no model is provided", () => {
+  const cliInput = openaiToCli({
+    model: "",
+    messages: [{ role: "user", content: "Hello" }],
+  });
+
+  assert.equal(cliInput.model, "sonnet");
+});

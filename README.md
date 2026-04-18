@@ -102,7 +102,7 @@ client = OpenAI(
 )
 
 resp = client.chat.completions.create(
-    model="claude-sonnet-4-6",
+    model="sonnet",
     messages=[{"role": "user", "content": "Say hi in one word."}],
 )
 print(resp.choices[0].message.content)
@@ -117,7 +117,7 @@ const client = new OpenAI({
 });
 
 const resp = await client.chat.completions.create({
-  model: "claude-sonnet-4-6",
+  model: "sonnet",
   messages: [{ role: "user", content: "Say hi in one word." }],
 });
 console.log(resp.choices[0].message.content);
@@ -129,7 +129,7 @@ console.log(resp.choices[0].message.content);
 curl -N http://127.0.0.1:3456/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-sonnet-4-6",
+    "model": "sonnet",
     "stream": true,
     "messages": [{ "role": "user", "content": "Write a haiku about local proxies." }]
   }'
@@ -146,7 +146,7 @@ curl -N http://127.0.0.1:3456/v1/chat/completions \
     {
       "title": "Claude via Max Proxy",
       "provider": "openai",
-      "model": "claude-sonnet-4-6",
+      "model": "sonnet",
       "apiBase": "http://127.0.0.1:3456/v1",
       "apiKey": "local"
     }
@@ -167,7 +167,7 @@ curl -N http://127.0.0.1:3456/v1/chat/completions \
       "api": "openai-completions",
       "auth": "api-key",
       "apiKey": "ignored",
-      "models": [{ "id": "claude-sonnet-4-6" }, { "id": "claude-opus-4-6" }]
+      "models": [{ "id": "sonnet" }, { "id": "opus" }]
     }
   }
 }
@@ -184,7 +184,11 @@ Use these defaults:
 | -------- | ----------------------------- |
 | Base URL | `http://127.0.0.1:3456/v1`    |
 | API key  | any non-empty string          |
-| Model    | whatever `/v1/models` returns |
+| Model    | `sonnet`, `opus`, `haiku`, or an exact ID from `/v1/models` |
+
+The proxy accepts stable family aliases and resolves them to whatever exact
+version the installed Claude CLI currently exposes. `GET /v1/models` returns
+those exact runtime-resolved IDs.
 
 </details>
 

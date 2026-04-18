@@ -78,7 +78,7 @@ launchctl kickstart -k gui/$(id -u)/com.claude-max-api-proxy
 # Just Ctrl-C and re-run `npm start`
 ```
 
-If this happens every time you start the proxy, your `claude` CLI installation is genuinely slow to warm. Run `claude --print --model claude-sonnet-4-6 "hi"` once manually from a normal shell to measure.
+If this happens every time you start the proxy, your `claude` CLI installation is genuinely slow to warm. Run `claude --print --model sonnet "hi"` once manually from a normal shell to measure.
 
 ---
 
@@ -89,7 +89,7 @@ If this happens every time you start the proxy, your `claude` CLI installation i
 The client asked for a model ID that the proxy didn't list in `/v1/models`. Two things to check:
 
 1. `curl http://127.0.0.1:3456/v1/models` — what IDs are actually available?
-2. Does your client's configured model ID exactly match one of them? The proxy does accept a few aliases (`opus`, `sonnet`, `haiku`, `maxproxy/...`, `claude-code-cli/...`) but exact IDs are safest.
+2. Is your client using either a family alias (`opus`, `sonnet`, `haiku`) or an exact ID from `/v1/models`? The proxy also accepts provider-prefixed variants like `maxproxy/...`, `claude-code-cli/...`, and `claude-max-api-proxy/...`.
 
 ### `400 "Third-party apps now draw from your extra usage, not your plan limits."`
 

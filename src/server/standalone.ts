@@ -77,7 +77,7 @@ async function main(): Promise<void> {
     );
     console.log(`    -H "Content-Type: application/json" \\`);
     console.log(
-      `    -d '{"model": "claude-sonnet-4-6", "messages": [{"role": "user", "content": "Hello!"}]}'`,
+      `    -d '{"model": "sonnet", "messages": [{"role": "user", "content": "Hello!"}]}'`,
     );
     console.log("\nPress Ctrl+C to stop.\n");
   } catch (err) {

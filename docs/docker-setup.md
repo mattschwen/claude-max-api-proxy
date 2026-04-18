@@ -144,7 +144,7 @@ That mounts `GET/POST/PUT /admin/thinking-budget`. Leave it disabled unless you 
 curl http://127.0.0.1:3456/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-opus-4-6",
+    "model": "opus",
     "reasoning_effort": "high",
     "messages": [{"role": "user", "content": "Plan a migration strategy."}]
   }'
@@ -153,7 +153,7 @@ curl http://127.0.0.1:3456/v1/chat/completions \
 curl http://127.0.0.1:3456/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-opus-4-6",
+    "model": "opus",
     "thinking": {"type": "enabled", "budget_tokens": 16000},
     "messages": [{"role": "user", "content": "Plan a migration strategy."}]
   }'
@@ -162,7 +162,7 @@ curl http://127.0.0.1:3456/v1/chat/completions \
 curl http://127.0.0.1:3456/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "X-Thinking-Budget: high" \
-  -d '{"model": "claude-opus-4-6", "messages": [...]}'
+  -d '{"model": "opus", "messages": [...]}'
 ```
 
 ## Rebuilding

@@ -45,9 +45,13 @@ curl http://127.0.0.1:3456/health
 
   "models": {
     "checkedAt": "2026-04-11T23:01:16.296Z",
-    "available": ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"],
+    "available": [
+      "claude-opus-<resolved-by-cli>",
+      "claude-sonnet-<resolved-by-cli>",
+      "claude-haiku-<resolved-by-cli>"
+    ],
     "unavailable": [
-      { "id": "claude-opus-4-6", "code": "model_unavailable", "message": "..." }
+      { "id": "opus", "code": "model_unavailable", "message": "..." }
     ]
   },
 
@@ -104,7 +108,7 @@ curl http://127.0.0.1:3456/health
 
 ## `GET /v1/models`
 
-OpenAI-compatible. Returns the list of models the current Claude CLI account can actually use on this machine. The list is computed at startup by probing each candidate model with a real `claude --print` call.
+OpenAI-compatible. Returns the list of models the current Claude CLI account can actually use on this machine. The list is computed by probing the stable Claude CLI family aliases (`sonnet`, `opus`, `haiku`) and publishing the exact versioned IDs that the installed CLI resolves at runtime.
 
 ### Example
 
@@ -119,13 +123,13 @@ curl http://127.0.0.1:3456/v1/models
   "object": "list",
   "data": [
     {
-      "id": "claude-sonnet-4-6",
+      "id": "claude-sonnet-<resolved-by-cli>",
       "object": "model",
       "owned_by": "anthropic",
       "created": 1710000000
     },
     {
-      "id": "claude-opus-4-7",
+      "id": "claude-opus-<resolved-by-cli>",
       "object": "model",
       "owned_by": "anthropic",
       "created": 1710000000
@@ -135,7 +139,7 @@ curl http://127.0.0.1:3456/v1/models
 ```
 
 > [!NOTE]
-> An empty `data` array is a **real** signal, not a bug. It means your current `claude auth` session cannot access any of the model IDs the proxy knows about. Re-run `claude auth status` and check the model probes in `/health.models.unavailable` for the specific reason each one failed.
+> An empty `data` array is a **real** signal, not a bug. It means your current `claude auth` session cannot access any of the model families the proxy probes. Re-run `claude auth status` and check `/health.models.unavailable` for the specific reason each family failed.
 
 ---
 
@@ -143,13 +147,19 @@ curl http://127.0.0.1:3456/v1/models
 
 OpenAI-compatible chat completion endpoint. Supports streaming (`stream: true`) and non-streaming.
 
+The proxy accepts:
+
+- stable family aliases: `sonnet`, `opus`, `haiku`
+- exact versioned IDs returned by `GET /v1/models`
+- older/future versioned IDs for those families, which are mapped to the currently available family model on this machine
+
 ### Minimal non-streaming request
 
 ```bash
 curl http://127.0.0.1:3456/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-sonnet-4-6",
+    "model": "sonnet",
     "messages": [
       { "role": "user", "content": "Reply with exactly: OK" }
     ]
@@ -163,7 +173,7 @@ curl http://127.0.0.1:3456/v1/chat/completions \
   "id": "chatcmpl-...",
   "object": "chat.completion",
   "created": 1775948570,
-  "model": "claude-sonnet-4-6",
+  "model": "claude-sonnet-<resolved-by-cli>",
   "choices": [
     {
       "index": 0,
@@ -185,7 +195,7 @@ curl http://127.0.0.1:3456/v1/chat/completions \
 curl -N http://127.0.0.1:3456/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-sonnet-4-6",
+    "model": "sonnet",
     "stream": true,
     "messages": [
       { "role": "user", "content": "Count from 1 to 5." }
@@ -208,7 +218,7 @@ Example using the standard `thinking` field:
 
 ```json
 {
-  "model": "claude-opus-4-6",
+  "model": "opus",
   "stream": true,
   "thinking": { "type": "enabled", "budget_tokens": 10000 },
   "messages": [
@@ -225,7 +235,7 @@ The OpenAI-standard `user` field is repurposed as a **conversation key**. Reuse 
 
 ```json
 {
-  "model": "claude-sonnet-4-6",
+  "model": "sonnet",
   "user": "chat-abc-123",
   "messages": [
     { "role": "user", "content": "Remember the number 17." }
@@ -235,7 +245,7 @@ The OpenAI-standard `user` field is repurposed as a **conversation key**. Reuse 
 
 ```json
 {
-  "model": "claude-sonnet-4-6",
+  "model": "sonnet",
   "user": "chat-abc-123",
   "messages": [
     { "role": "user", "content": "What number did I ask you to remember?" }
@@ -258,7 +268,7 @@ Errors follow OpenAI's error-envelope shape:
 ```json
 {
   "error": {
-    "message": "There's an issue with the selected model (claude-opus-4). ...",
+    "message": "There's an issue with the selected model (claude-opus-<requested>). ...",
     "type": "invalid_request_error",
     "code": "model_unavailable"
   }
