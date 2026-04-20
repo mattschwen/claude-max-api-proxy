@@ -1,0 +1,55 @@
+name: Bug report
+description: Report a reproducible problem with the proxy
+title: "[bug] "
+labels:
+  - bug
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Describe the problem in one or two sentences.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Provide the runtime details needed to reproduce the issue.
+      value: |
+        - OS:
+        - Node.js version:
+        - Claude CLI version:
+        - How you installed the proxy:
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: List the exact steps to reproduce the issue.
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: Expected behavior
+      description: What should have happened?
+    validations:
+      required: true
+  - type: textarea
+    id: actual_behavior
+    attributes:
+      label: Actual behavior
+      description: What happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: logs_and_diagnostics
+    attributes:
+      label: Logs and diagnostics
+      description: Include relevant excerpts from `npm start` output or service logs, `GET /health`, and `GET /v1/models`. Redact secrets, personal data, and organization names as needed.

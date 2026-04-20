@@ -1,0 +1,30 @@
+name: Feature request
+description: Suggest an improvement that fits the project scope
+title: "[feature] "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What problem are you trying to solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposed_solution
+    attributes:
+      label: Proposed solution
+      description: Describe the change you want to see.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives_considered
+    attributes:
+      label: Alternatives considered
+      description: What other approaches did you evaluate?
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional context
+      description: Add examples, screenshots, or related issues if they help explain the request.

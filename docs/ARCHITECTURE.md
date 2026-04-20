@@ -47,7 +47,9 @@ src/
 │   ├── openai-to-cli.ts     request  → subprocess args + prompt
 │   └── cli-to-openai.ts     subprocess stream → OpenAI chunks
 ├── server/               HTTP surface
-│   ├── routes.ts            Express routes; owns timeouts + streaming
+│   ├── routes.ts            Request validation, model resolution, health/admin routes
+│   ├── request-queue.ts     Same-conversation queue + cancellation state
+│   ├── chat-execution.ts    Streaming/non-streaming subprocess lifecycle
 │   └── standalone.ts        Startup probes, graceful shutdown, CLI entry
 ├── subprocess/           Claude CLI subprocess lifecycle
 │   ├── manager.ts           ClaudeSubprocess + global registry
@@ -65,13 +67,13 @@ src/
 
 ## Request lifecycle
 
-1. **HTTP in.** `POST /v1/chat/completions`, `POST /v1/responses`, or the scoped `/v1/agents/:agentId/*` variants hit `server/routes.ts`. Timeouts are installed here (stall + hard), not in the subprocess manager — the route is the single owner of timeout behavior.
+1. **HTTP in.** `POST /v1/chat/completions`, `POST /v1/responses`, or the scoped `/v1/agents/:agentId/*` variants hit `server/routes.ts`. Request validation and model/reasoning resolution stay there. Same-conversation queueing and cancellation are delegated into `server/request-queue.ts`. Timeout, retry, and SSE behavior are delegated into `server/chat-execution.ts`, which remains the single owner of request-lifecycle timers instead of the subprocess manager.
 
 2. **Agent profile injection.** If the caller selects a built-in agent (or the operator configured `CLAUDE_PROXY_DEFAULT_AGENT`), `agents.ts` prepends the canonical developer prompt and any agent-level defaults before request adaptation.
 
 3. **Adapter: OpenAI → CLI input.** `adapter/openai-to-cli.ts` pulls out system messages, assistant turns, and the final user message. It produces a `CliInput` with a prompt, an optional resolved system prompt, and session metadata. Multi-part content arrays (`[{type:"text", text:"..."}]`) are flattened.
 
-4. **Conversation queue.** The `user` field becomes the conversation key. Under `latest-wins`, a new request for the same key cancels any in-flight request and drops older queued work. Under `queue`, it waits FIFO. Queue events are emitted as structured logs when `CLAUDE_PROXY_DEBUG_QUEUES=true`.
+4. **Conversation queue.** The `user` field becomes the conversation key and `server/request-queue.ts` owns the per-conversation queue. Under `latest-wins`, a new request for the same key cancels any in-flight request and drops older queued work. Under `queue`, it waits FIFO. Queue events are emitted as structured logs when `CLAUDE_PROXY_DEBUG_QUEUES=true`.
 
 5. **Session resume decision.** `session/manager.ts` looks up whether this conversation already has a Claude CLI session ID. If so, the subprocess is spawned with `--resume <sessionId>`. Otherwise with `--session-id <newId>`. If resume fails twice in a row, the session is invalidated and the next request creates a fresh one.
 
@@ -89,7 +91,7 @@ The subprocess manager owns four invariants that keep the proxy stable under loa
 
 ### 1. Single ownership of timeouts
 
-`ClaudeSubprocess.start()` does **not** install any timeout itself. The caller (route handler) is the sole owner. This prevents the "dual-timeout" class of bug where the subprocess kills itself while the route is still streaming, or vice versa. See the `Phase 1c` comment in `manager.ts`.
+`ClaudeSubprocess.start()` does **not** install any timeout itself. The caller (`server/chat-execution.ts`, invoked from the route layer) is the sole owner. This prevents the "dual-timeout" class of bug where the subprocess kills itself while the HTTP layer is still streaming, or vice versa. See the `Phase 1c` comment in `manager.ts`.
 
 ### 2. Kill escalation
 

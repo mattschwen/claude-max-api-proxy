@@ -11,6 +11,7 @@ import {
   handleAgents,
   handleChatCompletions,
   handleCapabilities,
+  handleMetrics,
   handleModels,
   handleResponses,
   handleHealth,
@@ -18,6 +19,7 @@ import {
   handleSetThinkingBudget,
 } from "./routes.js";
 import { runtimeConfig } from "../config.js";
+import { httpMetricsMiddleware } from "../observability/metrics.js";
 import {
   startProactiveRefresh,
   stopProactiveRefresh,
@@ -36,6 +38,7 @@ function createApp(): express.Application {
   const app = express();
 
   app.use(express.json({ limit: "10mb" }));
+  app.use(httpMetricsMiddleware);
 
   app.use((req, _res, next) => {
     if (process.env.DEBUG) {
@@ -59,6 +62,7 @@ function createApp(): express.Application {
   });
 
   app.get("/health", handleHealth);
+  app.get("/metrics", handleMetrics);
   app.get("/v1/models", handleModels);
   app.get("/v1/capabilities", handleCapabilities);
   app.get("/v1/agents", handleAgents);

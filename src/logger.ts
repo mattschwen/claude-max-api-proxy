@@ -49,8 +49,19 @@ export interface LogEntry {
   [key: string]: unknown;
 }
 
+type LogListener = (entry: LogEntry) => void;
+
+const listeners = new Set<LogListener>();
+
 function emit(entry: LogEntry): void {
   console.log(JSON.stringify(entry));
+  for (const listener of listeners) {
+    try {
+      listener(entry);
+    } catch (err) {
+      console.error("[Logger Listener Error]:", err);
+    }
+  }
 }
 
 export function log(
@@ -67,4 +78,11 @@ export function logError(
 ): void {
   const message = error instanceof Error ? error.message : String(error);
   emit({ ts: new Date().toISOString(), event, reason: message, ...fields });
+}
+
+export function subscribeToLogs(listener: LogListener): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
 }

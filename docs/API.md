@@ -3,6 +3,7 @@
 `claude-max-api-proxy` exposes several HTTP endpoints on `http://127.0.0.1:3456` (by default). The OpenAI-compatible endpoints live under `/v1`. The `/health` endpoint is a non-OpenAI operational endpoint.
 
 - [`GET /health`](#get-health)
+- [`GET /metrics`](#get-metrics)
 - [`GET /v1/models`](#get-v1models)
 - [`GET /v1/capabilities`](#get-v1capabilities)
 - [`GET /v1/agents`](#get-v1agents)
@@ -106,6 +107,53 @@ curl http://127.0.0.1:3456/health
 | `pool.isWarm` | `false` means the CLI warm-up loop has gone idle; the next request may pay extra CLI/auth startup latency. |
 | `queues` | Long per-conversation queues indicate a stuck request or a client spamming the same conversation key. |
 | `stallDetections` | If this increments, the subprocess output stream is going idle mid-response. See [TROUBLESHOOTING](./TROUBLESHOOTING.md). |
+
+---
+
+## `GET /metrics`
+
+Operational metrics endpoint for scraping and dashboards.
+
+By default this returns Prometheus exposition format as `text/plain`.
+Add `?format=json` to get a structured JSON snapshot of both live gauges and
+accumulated counters/histograms.
+
+### Example
+
+```bash
+curl http://127.0.0.1:3456/metrics
+curl http://127.0.0.1:3456/metrics?format=json
+```
+
+### What it includes
+
+- HTTP request counts, durations, response sizes, and in-flight gauge
+- Proxy request starts, outcomes, retries, TTFB, response sizes, and queue depth
+- Queue event counters
+- Claude subprocess spawn / kill / stall / close counters
+- Session lifecycle counters
+- Auth, pool warm, CLI error, and token-validation counters
+- Live gauges for queued requests, active sessions, active subprocesses, pool state, store size, and model availability
+- Process uptime, memory, and CPU gauges/counters
+
+### Example metric names
+
+```text
+claude_proxy_http_requests_total
+claude_proxy_http_request_duration_ms_bucket
+claude_proxy_requests_started_total
+claude_proxy_request_outcomes_total
+claude_proxy_request_ttfb_ms_bucket
+claude_proxy_queue_events_total
+claude_proxy_subprocess_spawns_total
+claude_proxy_runtime_queued_requests
+claude_proxy_models_available
+claude_proxy_process_resident_memory_bytes
+```
+
+> [!NOTE]
+> `GET /metrics` is operational, not OpenAI-compatible. Use it for Prometheus,
+> dashboards, alerting, and capacity planning.
 
 ---
 

@@ -42,6 +42,7 @@
   <a href="#plug-in-any-openai-client">Clients</a> ·
   <a href="./docs/API.md">API</a> ·
   <a href="./docs/CONFIGURATION.md">Config</a> ·
+  <a href="./docs/CODEBASE_INDEX.md">Code Index</a> ·
   <a href="./docs/ARCHITECTURE.md">Architecture</a> ·
   <a href="./docs/TROUBLESHOOTING.md">Troubleshooting</a>
 </p>
@@ -103,7 +104,7 @@ surface.
 
 | Surface | Why it matters |
 | --- | --- |
-| OpenAI-compatible edge | `POST /v1/chat/completions`, `POST /v1/responses`, `GET /v1/models`, `GET /v1/capabilities`, `GET /v1/agents`, and `GET /health`. |
+| OpenAI-compatible edge | `POST /v1/chat/completions`, `POST /v1/responses`, `GET /v1/models`, `GET /v1/capabilities`, `GET /v1/agents`, `GET /health`, and `GET /metrics`. |
 | Zero extra credentials | Reuses the machine's existing `claude auth login` session instead of asking clients for a second API key. |
 | Dynamic model routing | Probes stable families like `sonnet`, `opus`, and `haiku`, then surfaces the exact model IDs your local Claude CLI currently resolves. |
 | Agent discovery | `GET /v1/capabilities` advertises the current runtime surface, CLI feature flags, and which resolved models use adaptive reasoning. |
@@ -135,6 +136,7 @@ then binds to `http://127.0.0.1:3456`.
 
 ```bash
 curl http://127.0.0.1:3456/health
+curl http://127.0.0.1:3456/metrics
 curl http://127.0.0.1:3456/v1/models
 curl http://127.0.0.1:3456/v1/capabilities
 curl http://127.0.0.1:3456/v1/agents
@@ -220,6 +222,7 @@ those runtime-resolved IDs.
 - `GET /v1/capabilities` lets adapters inspect current model IDs, reasoning support, and local Claude CLI feature flags before they connect.
 - `GET /v1/agents` and `GET /v1/agents/expert-coder` expose the built-in expert coding agent profile.
 - `POST /v1/agents/expert-coder/chat/completions` and `POST /v1/agents/expert-coder/responses` force requests through the canonical coding agent.
+- `GET /metrics` exposes Prometheus-style metrics for HTTP traffic, queue pressure, subprocesses, sessions, auth failures, and model availability. Add `?format=json` for a structured snapshot.
 
 ### Canonical coding agent
 
