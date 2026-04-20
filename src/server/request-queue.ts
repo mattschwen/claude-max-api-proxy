@@ -23,6 +23,16 @@ interface ActiveRequestEntry {
   pendingCancel?: ClaudeProxyError;
 }
 
+export interface ActiveRequestSnapshot {
+  conversationId: string;
+  requestId: string;
+  startedAt: number;
+  durationMs: number;
+  stream: boolean;
+  hasCancelHandler: boolean;
+  pendingCancel: boolean;
+}
+
 interface RequestQueueOptions {
   debugQueues?: () => boolean;
   sameConversationPolicy?: () => SameConversationPolicy;
@@ -206,6 +216,20 @@ export class ConversationRequestQueue {
 
   getActiveRequestCount(): number {
     return this.activeRequests.size;
+  }
+
+  getActiveRequests(now = this.now()): ActiveRequestSnapshot[] {
+    return Array.from(this.activeRequests.entries())
+      .map(([conversationId, entry]) => ({
+        conversationId,
+        requestId: entry.requestId,
+        startedAt: entry.startedAt,
+        durationMs: Math.max(0, now - entry.startedAt),
+        stream: entry.stream,
+        hasCancelHandler: typeof entry.cancel === "function",
+        pendingCancel: Boolean(entry.pendingCancel),
+      }))
+      .sort((left, right) => right.durationMs - left.durationMs);
   }
 
   getMaxConcurrent(): number {

@@ -18,6 +18,24 @@ interface MetricParams {
   clientDisconnected?: boolean;
 }
 
+export interface ConversationMessageRecord {
+  role: string;
+  content: string;
+  created_at: number;
+}
+
+export interface RecentConversationSummary {
+  id: string;
+  created_at: number;
+  updated_at: number;
+  model: string | null;
+  session_id: string | null;
+  message_count: number;
+  last_role: string | null;
+  last_content: string | null;
+  last_message_at: number | null;
+}
+
 class ConversationStore {
   private db: DatabaseSync | null = null;
 
@@ -91,15 +109,23 @@ class ConversationStore {
 
   getMessages(
     conversationId: string,
-  ): Array<{ role: string; content: string; created_at: number }> {
+  ): ConversationMessageRecord[] {
     this.init();
     return this.db!.prepare(
       "SELECT role, content, created_at FROM messages WHERE conversation_id = ? ORDER BY id ASC",
-    ).all(conversationId) as Array<{
-      role: string;
-      content: string;
-      created_at: number;
-    }>;
+    ).all(conversationId) as unknown as ConversationMessageRecord[];
+  }
+
+  getRecentMessages(
+    conversationId: string,
+    limit = 12,
+  ): ConversationMessageRecord[] {
+    this.init();
+    return (
+      this.db!.prepare(
+        "SELECT role, content, created_at FROM messages WHERE conversation_id = ? ORDER BY id DESC LIMIT ?",
+      ).all(conversationId, limit) as unknown as ConversationMessageRecord[]
+    ).reverse();
   }
 
   getConversation(conversationId: string): Record<string, unknown> | undefined {
@@ -196,11 +222,52 @@ class ConversationStore {
       metrics: metricCount,
     };
   }
+
+  getRecentConversations(limit = 12): RecentConversationSummary[] {
+    this.init();
+    return this.db!.prepare(
+      `
+      SELECT
+        c.id,
+        c.created_at,
+        c.updated_at,
+        c.model,
+        c.session_id,
+        COUNT(m.id) AS message_count,
+        (
+          SELECT role
+          FROM messages
+          WHERE conversation_id = c.id
+          ORDER BY id DESC
+          LIMIT 1
+        ) AS last_role,
+        (
+          SELECT content
+          FROM messages
+          WHERE conversation_id = c.id
+          ORDER BY id DESC
+          LIMIT 1
+        ) AS last_content,
+        (
+          SELECT created_at
+          FROM messages
+          WHERE conversation_id = c.id
+          ORDER BY id DESC
+          LIMIT 1
+        ) AS last_message_at
+      FROM conversations c
+      LEFT JOIN messages m ON m.conversation_id = c.id
+      GROUP BY c.id
+      ORDER BY c.updated_at DESC
+      LIMIT ?
+    `,
+    ).all(limit) as unknown as RecentConversationSummary[];
+  }
 }
 
 export const conversationStore = new ConversationStore();
 
-setInterval(
+const conversationCleanupTimer = setInterval(
   () => {
     try {
       conversationStore.cleanup();
@@ -210,3 +277,7 @@ setInterval(
   },
   6 * 60 * 60 * 1000,
 );
+
+if (typeof conversationCleanupTimer.unref === "function") {
+  conversationCleanupTimer.unref();
+}

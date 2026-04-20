@@ -6,6 +6,8 @@
 import express from "express";
 import { createServer, type Server } from "http";
 import type { Socket } from "net";
+import path from "node:path";
+import { networkInterfaces } from "os";
 import {
   handleAgentDetails,
   handleAgents,
@@ -18,6 +20,13 @@ import {
   handleGetThinkingBudget,
   handleSetThinkingBudget,
 } from "./routes.js";
+import {
+  handleOpsConversation,
+  handleOpsDashboard,
+  handleOpsSnapshot,
+  handleOpsStream,
+} from "./ops-dashboard.js";
+import { handleLauncher } from "./launcher.js";
 import { runtimeConfig } from "../config.js";
 import { httpMetricsMiddleware } from "../observability/metrics.js";
 import {
@@ -34,11 +43,48 @@ export interface ServerConfig {
 
 let serverInstance: Server | null = null;
 
+function getAdvertisedHosts(host: string): string[] {
+  if (host !== "0.0.0.0" && host !== "::" && host !== "::0") {
+    return [host];
+  }
+
+  const advertised = new Set<string>(["127.0.0.1", "localhost"]);
+  const interfaces = networkInterfaces();
+
+  for (const records of Object.values(interfaces)) {
+    for (const record of records ?? []) {
+      if (
+        record.family === "IPv4" &&
+        !record.internal &&
+        record.address &&
+        !record.address.startsWith("169.254.")
+      ) {
+        advertised.add(record.address);
+      }
+    }
+  }
+
+  return Array.from(advertised);
+}
+
 function createApp(): express.Application {
   const app = express();
 
   app.use(express.json({ limit: "10mb" }));
-  app.use(httpMetricsMiddleware);
+  app.use((req, res, next) => {
+    const isOpsRoute =
+      req.path === "/" ||
+      req.path === "/launch" ||
+      req.path === "/dashboard" ||
+      req.path.startsWith("/dashboard/") ||
+      req.path.startsWith("/ops") ||
+      req.path.startsWith("/assets/");
+    if (isOpsRoute) {
+      next();
+      return;
+    }
+    httpMetricsMiddleware(req, res, next);
+  });
 
   app.use((req, _res, next) => {
     if (process.env.DEBUG) {
@@ -57,10 +103,24 @@ function createApp(): express.Application {
     next();
   });
 
-  app.options("*", (_req, res) => {
+  app.options(/.*/, (_req, res) => {
     res.sendStatus(200);
   });
 
+  app.use("/assets", express.static(path.join(process.cwd(), "assets")));
+  app.get("/", handleOpsDashboard);
+  app.get("/launch", handleLauncher);
+  app.get("/ops", handleOpsDashboard);
+  app.get("/dashboard", handleOpsDashboard);
+  app.get("/ops/legacy", (_req, res) => {
+    res.redirect(302, "/ops");
+  });
+  app.get("/dashboard/legacy", (_req, res) => {
+    res.redirect(302, "/dashboard");
+  });
+  app.get("/ops/snapshot", handleOpsSnapshot);
+  app.get("/ops/stream", handleOpsStream);
+  app.get("/ops/conversations/:conversationId", handleOpsConversation);
   app.get("/health", handleHealth);
   app.get("/metrics", handleMetrics);
   app.get("/v1/models", handleModels);
@@ -131,12 +191,23 @@ export async function startServer(config: ServerConfig): Promise<Server> {
     });
 
     serverInstance.listen(port, host, () => {
-      console.log(
-        `[Server] Claude Max API Proxy running at http://${host}:${port}`,
-      );
-      console.log(
-        `[Server] OpenAI-compatible endpoint: http://${host}:${port}/v1/chat/completions`,
-      );
+      const advertisedHosts = getAdvertisedHosts(host);
+      console.log("[Server] Native command deck:");
+      for (const advertisedHost of advertisedHosts) {
+        console.log(`  http://${advertisedHost}:${port}`);
+      }
+      console.log("[Server] Launch deck:");
+      for (const advertisedHost of advertisedHosts) {
+        console.log(`  http://${advertisedHost}:${port}/launch`);
+      }
+      console.log("[Server] OpenAI-compatible endpoints:");
+      for (const advertisedHost of advertisedHosts) {
+        console.log(`  http://${advertisedHost}:${port}/v1/chat/completions`);
+      }
+      console.log("[Server] Dashboard alias:");
+      for (const advertisedHost of advertisedHosts) {
+        console.log(`  http://${advertisedHost}:${port}/ops`);
+      }
       // Defense-in-depth against refresh_token rotation races: proactively
       // drive a token refresh when the access_token is approaching expiry
       // during an otherwise-quiet interval. Only started from startServer

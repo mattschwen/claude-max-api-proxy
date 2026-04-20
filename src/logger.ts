@@ -4,6 +4,8 @@
  * Emits structured log entries for key proxy events.
  * All entries include timestamp and event type.
  */
+import fs from "node:fs";
+import path from "node:path";
 
 export type LogEvent =
   | "request.start"
@@ -52,9 +54,39 @@ export interface LogEntry {
 type LogListener = (entry: LogEntry) => void;
 
 const listeners = new Set<LogListener>();
+const LOG_FILE =
+  typeof process.env.CLAUDE_PROXY_LOG_FILE === "string" &&
+    process.env.CLAUDE_PROXY_LOG_FILE.trim()
+    ? process.env.CLAUDE_PROXY_LOG_FILE.trim()
+    : null;
+let fileStream: fs.WriteStream | null = null;
+
+function getFileStream(): fs.WriteStream | null {
+  if (!LOG_FILE) return null;
+  if (fileStream) return fileStream;
+
+  try {
+    fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
+    fileStream = fs.createWriteStream(LOG_FILE, {
+      flags: "a",
+      encoding: "utf8",
+    });
+    fileStream.on("error", (error) => {
+      console.error("[Logger File Error]:", error);
+      fileStream = null;
+    });
+  } catch (error) {
+    console.error("[Logger File Init Error]:", error);
+    fileStream = null;
+  }
+
+  return fileStream;
+}
 
 function emit(entry: LogEntry): void {
-  console.log(JSON.stringify(entry));
+  const line = JSON.stringify(entry);
+  console.log(line);
+  getFileStream()?.write(`${line}\n`);
   for (const listener of listeners) {
     try {
       listener(entry);

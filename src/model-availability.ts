@@ -17,6 +17,7 @@ import {
   type ModelDefinition,
   type ModelFamily,
 } from "./models.js";
+import { runtimeConfig } from "./config.js";
 import { log } from "./logger.js";
 
 const PROBE_TTL_MS = 10 * 60 * 1000;
@@ -68,11 +69,52 @@ function pickDefaultModel(
   return available[0] ?? null;
 }
 
+function normalizeProbeAlias(alias: string): string {
+  return stripModelProviderPrefix(alias).trim().toLowerCase();
+}
+
+function getUniqueAliases(aliases: string[]): string[] {
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const alias of aliases) {
+    const normalized = normalizeProbeAlias(alias);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    unique.push(normalized);
+  }
+  return unique;
+}
+
+function createResolvedDefinition(
+  alias: string,
+  resolvedModel?: string,
+): ModelDefinition | null {
+  const family = resolveModelFamily(resolvedModel || alias);
+  if (!family) return null;
+  const definition = createModelDefinition(family, resolvedModel || alias);
+  return {
+    ...definition,
+    alias,
+  };
+}
+
+function dedupeAvailableDefinitions(
+  definitions: ModelDefinition[],
+): ModelDefinition[] {
+  const seen = new Set<string>();
+  return definitions.filter((definition) => {
+    if (seen.has(definition.id)) return false;
+    seen.add(definition.id);
+    return true;
+  });
+}
+
 interface ModelAvailabilityDeps {
   verifyClaude: typeof verifyClaude;
   verifyAuth: typeof verifyAuth;
   probeModelAvailability: typeof probeModelAvailability;
   getModelDefinitions: typeof getModelDefinitions;
+  getFallbackAliases: () => string[];
   exitProcess: (code: number) => void;
 }
 
@@ -81,6 +123,7 @@ const defaultDeps: ModelAvailabilityDeps = {
   verifyAuth,
   probeModelAvailability,
   getModelDefinitions,
+  getFallbackAliases: () => runtimeConfig.modelFallbacks,
   exitProcess: (code) => {
     process.exit(code);
   },
@@ -110,6 +153,35 @@ export class ModelAvailabilityManager {
 
   invalidate(): void {
     this.snapshot = null;
+  }
+
+  private getFallbackAliases(): string[] {
+    return getUniqueAliases(this.deps.getFallbackAliases());
+  }
+
+  private resolveFallbackModel(
+    available: ModelDefinition[],
+  ): ModelDefinition | null {
+    for (const fallbackAlias of this.getFallbackAliases()) {
+      if (fallbackAlias === "default") {
+        return (
+          available.find((definition) => definition.alias === "default") ??
+          pickDefaultModel(available)
+        );
+      }
+
+      const exact = available.find(
+        (definition) =>
+          definition.alias === fallbackAlias || definition.id === fallbackAlias,
+      );
+      if (exact) return exact;
+
+      const family = resolveModelFamily(fallbackAlias);
+      if (!family) continue;
+      const byFamily = available.find((definition) => definition.family === family);
+      if (byFamily) return byFamily;
+    }
+    return null;
   }
 
   private scheduleSelfExit(): void {
@@ -185,7 +257,14 @@ export class ModelAvailabilityManager {
       return pickDefaultModel(snapshot.available);
     }
 
-    const normalized = stripModelProviderPrefix(requestedModel);
+    const normalized = normalizeProbeAlias(requestedModel);
+
+    if (normalized === "default") {
+      return (
+        snapshot.available.find((definition) => definition.alias === "default") ??
+        pickDefaultModel(snapshot.available)
+      );
+    }
 
     const exact = snapshot.available.find(
       (definition) => definition.id === normalized,
@@ -194,12 +273,12 @@ export class ModelAvailabilityManager {
 
     const family = resolveModelFamily(normalized);
     if (!family) {
-      return null;
+      return this.resolveFallbackModel(snapshot.available);
     }
 
     return (
       snapshot.available.find((definition) => definition.family === family) ??
-      null
+      this.resolveFallbackModel(snapshot.available)
     );
   }
 
@@ -261,18 +340,28 @@ export class ModelAvailabilityManager {
     this.consecutiveAuthFailures = 0;
     this.clearSelfExit();
 
-    const probes = await Promise.all(
+    const primaryProbes = await Promise.all(
       definitions.map(async (definition) => ({
         definition,
         result: await this.deps.probeModelAvailability(definition.alias),
       })),
     );
 
-    const available: ModelDefinition[] = [];
+    const fallbackAliases = this.getFallbackAliases().filter((alias) =>
+      !definitions.some((definition) => definition.alias === alias)
+    );
+    const fallbackProbes = await Promise.all(
+      fallbackAliases.map(async (alias) => ({
+        alias,
+        result: await this.deps.probeModelAvailability(alias),
+      })),
+    );
+
+    let available: ModelDefinition[] = [];
     const unavailable: ModelAvailabilitySnapshot["unavailable"] = [];
     let cliInit: ClaudeCliInit | undefined;
 
-    for (const probe of probes) {
+    for (const probe of primaryProbes) {
       const resolvedDefinition = createModelDefinition(
         probe.definition.family,
         probe.result.resolvedModel || probe.definition.alias,
@@ -293,6 +382,34 @@ export class ModelAvailabilityManager {
         });
       }
     }
+
+    for (const probe of fallbackProbes) {
+      const resolvedDefinition = createResolvedDefinition(
+        probe.alias,
+        probe.result.resolvedModel,
+      );
+      cliInit ||= probe.result.init;
+
+      if (!resolvedDefinition) {
+        continue;
+      }
+
+      if (probe.result.ok) {
+        available.push(resolvedDefinition);
+      } else {
+        unavailable.push({
+          definition: resolvedDefinition,
+          error: probe.result.error || {
+            status: 502,
+            type: "server_error",
+            code: "claude_cli_error",
+            message: `Claude CLI could not use model '${resolvedDefinition.alias}'`,
+          },
+        });
+      }
+    }
+
+    available = dedupeAvailableDefinitions(available);
 
     return {
       checkedAt: Date.now(),

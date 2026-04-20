@@ -23,6 +23,7 @@ import type {
 } from "../types/claude-cli.js";
 import type { ClaudeModel } from "../adapter/openai-to-cli.js";
 import { log } from "../logger.js";
+import { resolveModelFamily } from "../models.js";
 import {
   prepareClaudeSpawn,
   getCleanClaudeEnv,
@@ -36,6 +37,19 @@ import {
 } from "../reasoning.js";
 
 const KILL_ESCALATION_MS = 5000;
+
+export interface ActiveSubprocessSnapshot {
+  pid: number;
+  model: string;
+  modelFamily: string;
+  startedAt: number;
+  uptimeMs: number;
+  reasoningMode: string;
+  thinking: string;
+  isResume: boolean;
+  sessionId?: string;
+  sessionIdShort?: string;
+}
 
 export interface SubprocessOptions {
   model: ClaudeModel;
@@ -92,6 +106,13 @@ class SubprocessRegistry {
     return Array.from(this.active.keys());
   }
 
+  getActiveSnapshots(now = Date.now()): ActiveSubprocessSnapshot[] {
+    return Array.from(this.active.values())
+      .map((subprocess) => subprocess.getActiveSnapshot(now))
+      .filter((snapshot): snapshot is ActiveSubprocessSnapshot => snapshot !== null)
+      .sort((left, right) => right.uptimeMs - left.uptimeMs);
+  }
+
   get size(): number {
     return this.active.size;
   }
@@ -104,6 +125,12 @@ export class ClaudeSubprocess extends EventEmitter {
   private buffer = "";
   private killed = false;
   private escalationTimer: ReturnType<typeof setTimeout> | null = null;
+  private startedAt = 0;
+  private model: ClaudeModel | null = null;
+  private reasoningMode = "off";
+  private thinking = "off";
+  private sessionId?: string;
+  private isResume = false;
 
   /**
    * Start the Claude CLI subprocess with the given prompt.
@@ -147,6 +174,12 @@ export class ClaudeSubprocess extends EventEmitter {
           (options.thinkingBudget
           ? thinkingBudgetToEffort(options.thinkingBudget)
           : undefined);
+        this.startedAt = Date.now();
+        this.model = options.model;
+        this.reasoningMode = options.reasoningMode ?? "off";
+        this.thinking = effort ?? "off";
+        this.sessionId = options.sessionId;
+        this.isResume = options.isResume === true;
         log("subprocess.spawn", {
           pid,
           model: options.model,
@@ -317,6 +350,26 @@ export class ClaudeSubprocess extends EventEmitter {
 
   getPid(): number | null {
     return this.process?.pid ?? null;
+  }
+
+  getActiveSnapshot(now = Date.now()): ActiveSubprocessSnapshot | null {
+    const pid = this.getPid();
+    if (pid === null || !this.model || this.startedAt === 0) {
+      return null;
+    }
+
+    return {
+      pid,
+      model: this.model,
+      modelFamily: resolveModelFamily(this.model) ?? "unknown",
+      startedAt: this.startedAt,
+      uptimeMs: Math.max(0, now - this.startedAt),
+      reasoningMode: this.reasoningMode,
+      thinking: this.thinking,
+      isResume: this.isResume,
+      sessionId: this.sessionId,
+      sessionIdShort: this.sessionId?.slice(0, 8),
+    };
   }
 }
 export { verifyClaude, verifyAuth } from "../claude-cli.inspect.js";

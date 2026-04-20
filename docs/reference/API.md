@@ -159,7 +159,11 @@ claude_proxy_process_resident_memory_bytes
 
 ## `GET /v1/models`
 
-OpenAI-compatible. Returns the list of models the current Claude CLI account can actually use on this machine. The list is computed by probing the stable Claude CLI family aliases (`sonnet`, `opus`, `haiku`) and publishing the exact versioned IDs that the installed CLI resolves at runtime.
+OpenAI-compatible. Returns the list of models the current Claude CLI account can
+actually use on this machine, plus any configured external provider models.
+Claude availability is computed by probing the stable Claude CLI family aliases
+(`sonnet`, `opus`, `haiku`) and publishing the exact versioned IDs that the
+installed CLI resolves at runtime.
 
 ### Example
 
@@ -184,6 +188,18 @@ curl http://127.0.0.1:3456/v1/models
       "object": "model",
       "owned_by": "anthropic",
       "created": 1710000000
+    },
+    {
+      "id": "glm-4.7-flash",
+      "object": "model",
+      "owned_by": "zai",
+      "created": 1710000000
+    },
+    {
+      "id": "gemini-2.5-flash",
+      "object": "model",
+      "owned_by": "google",
+      "created": 1710000000
     }
   ]
 }
@@ -191,6 +207,13 @@ curl http://127.0.0.1:3456/v1/models
 
 > [!NOTE]
 > An empty `data` array is a **real** signal, not a bug. It means your current `claude auth` session cannot access any of the model families the proxy probes. Re-run `claude auth status` and check `/health.models.unavailable` for the specific reason each family failed.
+
+> [!NOTE]
+> If `GEMINI_CLI_ENABLED`, `GEMINI_CLI_MODEL`, `GEMINI_CLI_EXTRA_MODELS`,
+> `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `ZAI_API_KEY`, `BIGMODEL_API_KEY`, or the
+> explicit `OPENAI_COMPAT_FALLBACK_*` variables are configured, `/v1/models`
+> also advertises those external provider models. They are explicit opt-in
+> routes, not the implicit default.
 
 ---
 
@@ -260,6 +283,9 @@ curl http://127.0.0.1:3456/v1/capabilities
 
 Use this endpoint to decide whether to call `/v1/chat/completions` or `/v1/responses`, whether the current runtime can handle adaptive reasoning, and whether a higher-level MCP shim still needs to be added outside the proxy.
 
+When an external provider is configured, the payload also includes
+`externalProviders` plus the merged model list under `models.available`.
+
 ---
 
 ## `GET /v1/agents`
@@ -314,6 +340,7 @@ The proxy accepts:
 - stable family aliases: `sonnet`, `opus`, `haiku`
 - exact versioned IDs returned by `GET /v1/models`
 - older/future versioned IDs for those families, which are mapped to the currently available family model on this machine
+- configured external provider models such as `gemini-2.5-pro`, `gemini-2.5-flash`, `glm-4.7-flash`, `glm-5`, or `glm-4.7`
 - optional built-in agent selection via request body `"agent": "expert-coder"` or the scoped `/v1/agents/:agentId/chat/completions` route
 
 ### Minimal non-streaming request
@@ -367,6 +394,21 @@ curl -N http://127.0.0.1:3456/v1/chat/completions \
 ```
 
 Response is a Server-Sent Events stream of OpenAI-shaped `chat.completion.chunk` objects, terminated by `data: [DONE]`.
+
+### External provider behavior
+
+When an external provider is configured:
+
+- requests for a configured external model ID are sent there directly
+- requests that omit `model`, use `default`, or ask for Claude families stay on
+  the Claude path
+- if Claude has no accessible models, those Claude-default requests return a
+  Claude error instead of silently switching providers
+- `/v1/responses` inherits the same behavior because it reuses this endpoint
+
+The local Gemini CLI provider can advertise multiple model IDs via
+`GEMINI_CLI_EXTRA_MODELS`. API-key fallbacks still advertise one configured
+model at a time.
 
 ### Reasoning controls
 

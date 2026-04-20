@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   createModelDefinition,
   getModelList,
+  isClaudeModelRequest,
   isValidModel,
   normalizeModelName,
   parseClaudeModelVersion,
@@ -23,7 +24,18 @@ test("resolveModelFamily handles provider-prefixed and versioned model ids", () 
 test("isValidModel accepts future versioned family ids", () => {
   assert.equal(isValidModel("claude-sonnet-9-9"), true);
   assert.equal(isValidModel("claude-max-api-proxy/claude-opus-42-1"), true);
+  assert.equal(isValidModel("default"), true);
   assert.equal(isValidModel("gpt-4.1"), false);
+});
+
+test("isClaudeModelRequest keeps omitted and Claude-family selections on the Claude path", () => {
+  assert.equal(isClaudeModelRequest(undefined), true);
+  assert.equal(isClaudeModelRequest(""), true);
+  assert.equal(isClaudeModelRequest("default"), true);
+  assert.equal(isClaudeModelRequest("sonnet"), true);
+  assert.equal(isClaudeModelRequest("claude-sonnet-4-7"), true);
+  assert.equal(isClaudeModelRequest("gemini-2.5-pro"), false);
+  assert.equal(isClaudeModelRequest("glm-4.7-flash"), false);
 });
 
 test("normalizeModelName strips provider prefixes and preserves resolved ids", () => {

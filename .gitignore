@@ -38,3 +38,6 @@ coverage/
 # Runtime artifacts
 *.tgz
 *.pid
+
+# Local AI context
+.impeccable.md

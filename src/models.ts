@@ -8,6 +8,7 @@
  */
 
 export type ModelFamily = "opus" | "sonnet" | "haiku";
+export type SpecialModelAlias = "default";
 
 export interface ModelDefinition {
   id: string;
@@ -55,6 +56,8 @@ export const PROVIDER_PREFIXES = [
   "claude-max-api-proxy/",
 ];
 
+const SPECIAL_MODEL_ALIASES = new Set<SpecialModelAlias>(["default"]);
+
 const FAMILY_PATTERNS: Record<ModelFamily, RegExp> = {
   opus: /(?:^|[/:._-])opus(?:$|[/:._-])/i,
   sonnet: /(?:^|[/:._-])sonnet(?:$|[/:._-])/i,
@@ -89,6 +92,11 @@ export function stripModelProviderPrefix(model: string): string {
   }
 
   return stripped;
+}
+
+export function isSpecialModelAlias(model: string): boolean {
+  const normalized = stripModelProviderPrefix(model).toLowerCase();
+  return SPECIAL_MODEL_ALIASES.has(normalized as SpecialModelAlias);
 }
 
 /**
@@ -154,7 +162,22 @@ export function getStallTimeout(model: string): number {
  * Check if a model string is recognized.
  */
 export function isValidModel(model: string): boolean {
-  return getModelConfigForName(model) !== null;
+  return isSpecialModelAlias(model) || getModelConfigForName(model) !== null;
+}
+
+export function isClaudeModelRequest(
+  model: string | null | undefined,
+): boolean {
+  if (model == null) {
+    return true;
+  }
+
+  const normalized = stripModelProviderPrefix(model).trim();
+  if (!normalized) {
+    return true;
+  }
+
+  return isSpecialModelAlias(normalized) || resolveModelFamily(normalized) !== null;
 }
 
 /**

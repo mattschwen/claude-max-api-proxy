@@ -1,0 +1,98 @@
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&family=Oxanium:wght@500;600;700;800&display=swap");
+
+:root {
+  color-scheme: dark;
+
+  /* Primitive */
+  --primitive-color-ink-950: #060814;
+  --primitive-color-ink-900: #0b1020;
+  --primitive-color-ink-850: #11182c;
+  --primitive-color-steel-700: #2a3551;
+  --primitive-color-steel-500: #6f8bb7;
+  --primitive-color-ice-300: #9fdfff;
+  --primitive-color-ice-100: #ebf7ff;
+  --primitive-color-cyan-500: #2fe6ff;
+  --primitive-color-pink-500: #ff4fa8;
+  --primitive-color-violet-500: #9a6bff;
+  --primitive-color-lime-400: #74ffb0;
+  --primitive-color-amber-400: #ffd66b;
+
+  --primitive-font-display: "Oxanium", "Bank Gothic", "Avenir Next Condensed", sans-serif;
+  --primitive-font-body: "Manrope", "Avenir Next", "Segoe UI Variable", sans-serif;
+  --primitive-font-mono: "IBM Plex Mono", "SFMono-Regular", "Menlo", monospace;
+
+  --primitive-radius-lg: 18px;
+  --primitive-radius-xl: 24px;
+  --primitive-radius-2xl: 32px;
+
+  --primitive-space-4: 16px;
+  --primitive-space-6: 24px;
+
+  --primitive-shadow-panel: 0 22px 68px rgba(3, 7, 18, 0.44);
+  --primitive-shadow-elevated: 0 28px 90px rgba(2, 6, 16, 0.56);
+
+  --primitive-motion-quick: 180ms cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* Semantic */
+  --color-canvas: var(--primitive-color-ink-950);
+  --color-surface: var(--primitive-color-ink-900);
+  --color-surface-raised: var(--primitive-color-ink-850);
+  --color-text-primary: var(--primitive-color-ice-100);
+  --color-text-secondary: color-mix(
+    in oklab,
+    var(--primitive-color-ice-100) 88%,
+    var(--primitive-color-steel-500) 12%
+  );
+  --color-text-muted: color-mix(
+    in oklab,
+    var(--primitive-color-ice-100) 72%,
+    var(--primitive-color-steel-500) 28%
+  );
+  --color-accent-cyan: var(--primitive-color-cyan-500);
+  --color-accent-pink: var(--primitive-color-pink-500);
+  --color-accent-violet: var(--primitive-color-violet-500);
+  --color-accent-lime: var(--primitive-color-lime-400);
+  --color-accent-amber: var(--primitive-color-amber-400);
+
+  --font-display: var(--primitive-font-display);
+  --font-body: var(--primitive-font-body);
+  --font-mono: var(--primitive-font-mono);
+
+  --radius-lg: var(--primitive-radius-lg);
+  --radius-xl: var(--primitive-radius-xl);
+  --radius-2xl: var(--primitive-radius-2xl);
+
+  --space-4: var(--primitive-space-4);
+  --space-6: var(--primitive-space-6);
+
+  --shadow-panel: var(--primitive-shadow-panel);
+  --shadow-elevated: var(--primitive-shadow-elevated);
+
+  --motion-quick: var(--primitive-motion-quick);
+
+  --text-label: 0.75rem;
+  --text-caption: 0.8125rem;
+  --text-body-sm: 0.9375rem;
+  --text-body: 1rem;
+  --text-title: 1.125rem;
+  --text-section: 1.375rem;
+  --text-display: clamp(2.8rem, 5vw, 5.4rem);
+
+  --leading-tight: 1.12;
+  --leading-copy: 1.6;
+  --tracking-label: 0.22em;
+  --tracking-title: 0.08em;
+
+  /* Component */
+  --panel-radius: var(--radius-xl);
+  --panel-border: rgba(151, 118, 229, 0.22);
+
+  --button-radius: 16px;
+  --button-bg: linear-gradient(
+    135deg,
+    rgba(29, 20, 54, 0.96),
+    rgba(12, 18, 33, 0.92)
+  );
+  --button-border: rgba(201, 111, 255, 0.24);
+  --button-text: var(--color-text-primary);
+}

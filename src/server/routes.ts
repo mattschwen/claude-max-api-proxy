@@ -22,11 +22,22 @@ import { v4 as uuidv4 } from "uuid";
 import { openaiToCli } from "../adapter/openai-to-cli.js";
 import { sessionManager } from "../session/manager.js";
 import { conversationStore } from "../store/conversation.js";
-import { getModelTimeout, isValidModel, supportsAdaptiveReasoningModel } from "../models.js";
+import {
+  getModelTimeout,
+  isClaudeModelRequest,
+  isValidModel,
+  stripModelProviderPrefix,
+  supportsAdaptiveReasoningModel,
+} from "../models.js";
 import { log, logError } from "../logger.js";
 import { modelAvailability } from "../model-availability.js";
 import { type ClaudeProxyError } from "../claude-cli.inspect.js";
 import { runtimeConfig, persistRuntimeState } from "../config.js";
+import {
+  getExternalProviderForModel,
+  getPublicExternalModelList,
+  getPublicExternalProviderInfos,
+} from "../external-providers.js";
 import {
   chatToResponsesResponse,
   responsesToChatRequest,
@@ -49,6 +60,11 @@ import {
   buildCapabilitiesSummary,
   collectOperationalSnapshot,
 } from "./runtime-snapshot.js";
+import { collectOpsDashboardSnapshot } from "./ops-snapshot.js";
+import {
+  buildOperationalJsonSnapshot,
+  renderOperationalPrometheus,
+} from "./ops-prometheus.js";
 import {
   getExecutionStats,
   handleNonStreamingResponse,
@@ -62,6 +78,7 @@ import {
   MAX_QUEUE_DEPTH,
   RequestCancelledError,
 } from "./request-queue.js";
+import { handleExternalChatCompletions } from "./external-chat.js";
 export { isAuthError, withAuthRetry } from "./auth-retry.js";
 
 // ---------------------------------------------------------------------------
@@ -71,6 +88,55 @@ export { isAuthError, withAuthRetry } from "./auth-retry.js";
 // ---------------------------------------------------------------------------
 // Main handler
 // ---------------------------------------------------------------------------
+
+function mergePublicModels(
+  models: Array<{
+    id: string;
+    object: string;
+    owned_by: string;
+    created?: number;
+  }>,
+): Array<{
+  id: string;
+  object: string;
+  owned_by: string;
+  created?: number;
+}> {
+  const merged = [...models];
+  const seen = new Set(models.map((model) => model.id));
+  for (const fallbackModel of getPublicExternalModelList()) {
+    if (seen.has(fallbackModel.id)) continue;
+    seen.add(fallbackModel.id);
+    merged.push(fallbackModel);
+  }
+  return merged;
+}
+
+function getAdvertisedModelIds(
+  availability: Awaited<ReturnType<typeof modelAvailability.getSnapshot>> | null,
+): string[] {
+  const models = availability?.available.map((model) => model.id) || [];
+  const seen = new Set(models);
+  for (const fallbackModel of getPublicExternalModelList()) {
+    if (seen.has(fallbackModel.id)) continue;
+    seen.add(fallbackModel.id);
+    models.push(fallbackModel.id);
+  }
+  return models;
+}
+
+function buildExternalExplicitOnlySuffix(
+  requestedModel: string | undefined,
+): string {
+  if (
+    !isClaudeModelRequest(requestedModel) ||
+    getPublicExternalProviderInfos().length === 0
+  ) {
+    return "";
+  }
+
+  return " External providers are configured, but Claude remains the implicit default. Request one of the external model IDs from GET /v1/models explicitly if you want to route there.";
+}
 
 export async function handleChatCompletions(
   req: Request,
@@ -125,58 +191,19 @@ export async function handleChatCompletions(
   const body = effectiveRequest as OpenAIChatRequest & Record<string, unknown>;
   const stream = body.stream === true;
   const requestedModel = body.model ? String(body.model) : undefined;
+  const externalRequestedProvider = getExternalProviderForModel(requestedModel);
 
-  if (requestedModel && !isValidModel(requestedModel)) {
+  if (
+    requestedModel &&
+    !isValidModel(requestedModel) &&
+    !externalRequestedProvider
+  ) {
     res.status(400).json({
       error: {
         message: `Model '${requestedModel}' is not supported. Use GET /v1/models for available models.`,
         type: "invalid_request_error",
         code: "model_not_found",
       },
-    });
-    return;
-  }
-
-  const availability = await modelAvailability.getSnapshot();
-  if (availability.available.length === 0) {
-    sendJsonError(res, {
-      status: 503,
-      type: "server_error",
-      code: "no_models_available",
-      message:
-        availability.unavailable[0]?.error.message ||
-        "No Claude models are currently accessible via Claude CLI.",
-    });
-    return;
-  }
-
-  const resolvedModel =
-    await modelAvailability.resolveRequestedModel(requestedModel);
-  if (!resolvedModel) {
-    sendJsonError(res, {
-      status: 503,
-      type: "server_error",
-      code: "model_unavailable",
-      message: requestedModel
-        ? `Model '${requestedModel}' is not currently available to this Claude CLI account. Use GET /v1/models to see accessible models.`
-        : "No default Claude model is currently available.",
-    });
-    return;
-  }
-
-  const reasoning = resolveReasoningConfig({
-    body,
-    headerBudget: req.header("x-thinking-budget") || undefined,
-    runtimeDefault: runtimeConfig.defaultThinkingBudget,
-    resolvedModel: resolvedModel.id,
-    cliVersion: availability.cli?.version,
-  });
-  if (reasoning.requiresCliUpgrade) {
-    sendJsonError(res, {
-      status: 400,
-      type: "invalid_request_error",
-      code: "adaptive_reasoning_requires_cli_upgrade",
-      message: `Model '${resolvedModel.id}' expects adaptive reasoning, but the installed Claude CLI (${availability.cli?.version || "unknown"}) is too old. Upgrade Claude Code CLI to 2.1.111 or newer.`,
     });
     return;
   }
@@ -205,14 +232,106 @@ export async function handleChatCompletions(
     return;
   }
 
-  const tempModel = requestedModel || resolvedModel.id;
-  const baseTimeout = getModelTimeout(tempModel);
+  if (externalRequestedProvider) {
+    const resolvedExternalModel =
+      externalRequestedProvider.resolveModel(requestedModel) ||
+      externalRequestedProvider.getDefaultModel();
+    if (!resolvedExternalModel) {
+      sendJsonError(res, {
+        status: 503,
+        type: "server_error",
+        code: "external_provider_unavailable",
+        message: `External provider for model '${requestedModel}' is configured but did not expose a usable model.`,
+      });
+      return;
+    }
+
+    await handleExternalChatCompletions({
+      provider: externalRequestedProvider,
+      res,
+      body,
+      requestId,
+      conversationId,
+      requestedModel,
+      stream,
+      agentId: agent?.id,
+      queueDepth,
+      startTime,
+      resolvedModel: resolvedExternalModel,
+    });
+    return;
+  }
+
+  const availability = await modelAvailability.getSnapshot();
+  if (availability.available.length === 0) {
+    const fallbackSuffix = runtimeConfig.modelFallbacks.length > 0
+      ? ` Configured fallbacks (${runtimeConfig.modelFallbacks.join(", ")}) did not probe successfully either.`
+      : "";
+    const externalSuffix = buildExternalExplicitOnlySuffix(requestedModel);
+    sendJsonError(res, {
+      status: 503,
+      type: "server_error",
+      code: "no_models_available",
+      message: availability.unavailable[0]?.error.message
+        ? `${availability.unavailable[0].error.message}${fallbackSuffix}${externalSuffix}`
+        : `No Claude models are currently accessible via Claude CLI.${fallbackSuffix}${externalSuffix}`,
+    });
+    return;
+  }
+
+  const resolvedModel =
+    await modelAvailability.resolveRequestedModel(requestedModel);
+  if (!resolvedModel) {
+    const fallbackSuffix = runtimeConfig.modelFallbacks.length > 0
+      ? ` Configured fallbacks (${runtimeConfig.modelFallbacks.join(", ")}) are also unavailable right now.`
+      : "";
+    const externalSuffix = buildExternalExplicitOnlySuffix(requestedModel);
+    sendJsonError(res, {
+      status: 503,
+      type: "server_error",
+      code: "model_unavailable",
+      message: requestedModel
+        ? `Model '${requestedModel}' is not currently available to this Claude CLI account.${fallbackSuffix}${externalSuffix} Use GET /v1/models to see accessible models.`
+        : `No default Claude model is currently available.${externalSuffix}`,
+    });
+    return;
+  }
+
+  const reasoning = resolveReasoningConfig({
+    body,
+    headerBudget: req.header("x-thinking-budget") || undefined,
+    runtimeDefault: runtimeConfig.defaultThinkingBudget,
+    resolvedModel: resolvedModel.id,
+    cliVersion: availability.cli?.version,
+  });
+  if (reasoning.requiresCliUpgrade) {
+    sendJsonError(res, {
+      status: 400,
+      type: "invalid_request_error",
+      code: "adaptive_reasoning_requires_cli_upgrade",
+      message: `Model '${resolvedModel.id}' expects adaptive reasoning, but the installed Claude CLI (${availability.cli?.version || "unknown"}) is too old. Upgrade Claude Code CLI to 2.1.111 or newer.`,
+    });
+    return;
+  }
+
+  const normalizedRequestedModel = requestedModel
+    ? stripModelProviderPrefix(requestedModel)
+    : undefined;
+  const fallbackUsed = Boolean(
+    normalizedRequestedModel &&
+      normalizedRequestedModel !== resolvedModel.id &&
+      normalizedRequestedModel !== resolvedModel.alias,
+  );
+  const baseTimeout = getModelTimeout(resolvedModel.id);
   const hardTimeout = reasoning.active ? baseTimeout * 3 : baseTimeout;
 
   log("request.start", {
     requestId,
     conversationId,
-    model: tempModel,
+    model: resolvedModel.id,
+    requestedModel: normalizedRequestedModel,
+    cliModel: resolvedModel.alias,
+    fallbackUsed,
     stream,
     agent: agent?.id,
     queueDepth,
@@ -270,7 +389,7 @@ export async function handleChatCompletions(
           const cliInput = openaiToCli(
             body as unknown as Parameters<typeof openaiToCli>[0],
             isResume,
-            resolvedModel.id,
+            resolvedModel.alias,
           );
           cliInput.sessionId = sessionId;
           cliInput.isResume = isResume;
@@ -373,7 +492,7 @@ export async function handleModels(
   _req: Request,
   res: Response,
 ): Promise<void> {
-  const data = await modelAvailability.getPublicModelList();
+  const data = mergePublicModels(await modelAvailability.getPublicModelList());
   res.json({
     object: "list",
     data,
@@ -384,7 +503,7 @@ function buildCapabilitiesPayload(
   availability: Awaited<ReturnType<typeof modelAvailability.getSnapshot>> | null,
 ): Record<string, unknown> {
   const agents = listBuiltinAgents();
-  const availableModels = availability?.available.map((model) => model.id) || [];
+  const availableModels = getAdvertisedModelIds(availability);
   const adaptiveModels = availableModels.filter((model) =>
     supportsAdaptiveReasoningModel(model),
   );
@@ -437,6 +556,7 @@ function buildCapabilitiesPayload(
     models: {
       available: availableModels,
     },
+    externalProviders: getPublicExternalProviderInfos(),
     cli: availability?.cli ?? null,
   };
 }
@@ -595,6 +715,10 @@ export async function handleHealth(
       debugQueues: runtimeConfig.debugQueues,
       enableAdminApi: runtimeConfig.enableAdminApi,
       defaultAgent: runtimeConfig.defaultAgent ?? null,
+      modelFallbacks: runtimeConfig.modelFallbacks,
+      geminiCliFallback: runtimeConfig.geminiCliFallback,
+      externalFallback: runtimeConfig.externalFallback,
+      externalProviders: getPublicExternalProviderInfos(),
     },
     auth: snapshot.availability?.auth ?? undefined,
     models: snapshot.availability
@@ -627,41 +751,21 @@ export async function handleMetrics(
   req: Request,
   res: Response,
 ): Promise<void> {
-  const snapshot = await collectOperationalSnapshot();
-  const queueSnapshot = buildQueueSnapshot(
-    conversationRequestQueue.getQueueEntries(),
-  );
-
-  const runtime = {
-    activeRequests: conversationRequestQueue.getActiveRequestCount(),
-    queuedRequests: queueSnapshot.queuedRequests,
-    queuedConversations: queueSnapshot.queuedConversations,
-    oldestQueueWaitMs: queueSnapshot.oldestQueueWaitMs,
-    responseConversationEntries: responseConversationStore.size,
-    activeSubprocesses: snapshot.activePids.length,
-    activeSessions: sessionManager.size,
-    sessionFailureStats: snapshot.failureStats,
-    store: snapshot.storeStats,
-    pool: snapshot.poolStatus,
-    modelAvailability: snapshot.availability
-      ? {
-          available: snapshot.availability.available.length,
-          unavailable: snapshot.availability.unavailable.length,
-          consecutiveAuthFailures: snapshot.consecutiveAuthFailures,
-          lastCheckedAt: new Date(snapshot.availability.checkedAt).toISOString(),
-        }
-      : {
-          available: 0,
-          unavailable: 0,
-          consecutiveAuthFailures: snapshot.consecutiveAuthFailures,
-        },
-  };
+  const snapshot = await collectOpsDashboardSnapshot({
+    logLimit: 0,
+    conversationLimit: 18,
+  });
 
   if (req.query.format === "json") {
-    res.json(proxyMetrics.getJsonSnapshot(runtime));
+    res.json({
+      ...proxyMetrics.getJsonSnapshot(snapshot.runtime),
+      ops: buildOperationalJsonSnapshot(snapshot),
+    });
     return;
   }
 
   res.setHeader("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
-  res.send(proxyMetrics.renderPrometheus(runtime));
+  res.send(
+    `${proxyMetrics.renderPrometheus(snapshot.runtime)}${renderOperationalPrometheus(snapshot)}`,
+  );
 }

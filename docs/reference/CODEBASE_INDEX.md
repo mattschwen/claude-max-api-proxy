@@ -52,6 +52,8 @@ For `POST /v1/chat/completions`:
 1. Validate the request body and chosen built-in agent.
 2. Apply the built-in agent profile if requested or configured by default.
 3. Resolve the requested model against the current runtime availability cache.
+   If the caller explicitly named a configured external model ID, route there.
+   Otherwise the implicit path remains Claude.
 4. Normalize reasoning settings from request body, headers, and runtime default.
 5. Choose the conversation key from OpenAI `user` or the request id.
 6. Apply the same-conversation policy:
@@ -160,6 +162,8 @@ Important rules:
 - `resolveRequestedModel()` accepts either the family alias or an exact
   resolved id returned by `/v1/models`.
 - Default family preference is `sonnet`, then `opus`, then `haiku`.
+- External provider models can also appear in `/v1/models`, but they are
+  explicit routes only. Omitting `model` still means Claude.
 
 ## Reasoning Behavior
 

@@ -2,13 +2,38 @@ services:
   claude-max-proxy:
     build: .
     container_name: claude-max-proxy
+    profiles:
+      - container-proxy
+    init: true
     restart: unless-stopped
+    stop_grace_period: 40s
     user: "${PUID:-1000}:${PGID:-1000}"
     environment:
       HOME: /home/node
       HOST: 0.0.0.0
       DB_PATH: /data/conversations.db
       SESSION_FILE: /data/sessions.json
+      RUNTIME_STATE_FILE: /data/runtime-state.json
+      CLAUDE_PROXY_LOG_FILE: /data/logs/proxy.jsonl
+      OPEN_WEBUI_PORT: ${OPEN_WEBUI_PORT:-8080}
+      GEMINI_CLI_ENABLED: ${GEMINI_CLI_ENABLED:-}
+      GEMINI_CLI_COMMAND: ${GEMINI_CLI_COMMAND:-}
+      GEMINI_CLI_MODEL: ${GEMINI_CLI_MODEL:-}
+      GEMINI_CLI_EXTRA_MODELS: ${GEMINI_CLI_EXTRA_MODELS:-}
+      GEMINI_CLI_WORKDIR: ${GEMINI_CLI_WORKDIR:-}
+      GEMINI_CLI_STREAM_MODE: ${GEMINI_CLI_STREAM_MODE:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      ZAI_API_KEY: ${ZAI_API_KEY:-}
+      BIGMODEL_API_KEY: ${BIGMODEL_API_KEY:-}
+      ZAI_MODEL: ${ZAI_MODEL:-}
+      ZAI_BASE_URL: ${ZAI_BASE_URL:-}
+      ZAI_CODING_PLAN: ${ZAI_CODING_PLAN:-}
+      OPENAI_COMPAT_FALLBACK_PROVIDER: ${OPENAI_COMPAT_FALLBACK_PROVIDER:-}
+      OPENAI_COMPAT_FALLBACK_BASE_URL: ${OPENAI_COMPAT_FALLBACK_BASE_URL:-}
+      OPENAI_COMPAT_FALLBACK_API_KEY: ${OPENAI_COMPAT_FALLBACK_API_KEY:-}
+      OPENAI_COMPAT_FALLBACK_MODEL: ${OPENAI_COMPAT_FALLBACK_MODEL:-}
+      OPENAI_COMPAT_FALLBACK_STREAM_MODE: ${OPENAI_COMPAT_FALLBACK_STREAM_MODE:-}
     volumes:
       - ${CLAUDE_CONFIG_DIR:-${HOME}/.claude}:/home/node/.claude:ro
       - ${CLAUDE_CONFIG_FILE:-${HOME}/.claude.json}:/home/node/.claude.json:ro
@@ -19,6 +44,38 @@ services:
       - claude-max-proxy-data:/data
     ports:
       - "${PORT:-3456}:3456"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3456/health').then((res) => { if (!res.ok) process.exit(1); }).catch(() => process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: claw-open-webui
+    restart: unless-stopped
+    environment:
+      WEBUI_NAME: Claw Command Deck
+      ENABLE_OPENAI_API: "True"
+      ENABLE_OLLAMA_API: "False"
+      ENABLE_DIRECT_CONNECTIONS: "True"
+      OPENAI_API_BASE_URL: ${OPEN_WEBUI_OPENAI_API_BASE_URL:-http://host.docker.internal:3456/v1}
+      OPENAI_API_KEY: ${OPEN_WEBUI_OPENAI_API_KEY:-local}
+      TASK_MODEL_EXTERNAL: ${OPEN_WEBUI_TASK_MODEL_EXTERNAL:-sonnet}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - open-webui-data:/app/backend/data
+    ports:
+      - "${OPEN_WEBUI_PORT:-8080}:8080"
 
 volumes:
   claude-max-proxy-data:
+  open-webui-data:

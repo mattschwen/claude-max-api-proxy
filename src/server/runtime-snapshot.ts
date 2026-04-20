@@ -1,3 +1,4 @@
+import { hasConfiguredExternalProvider } from "../external-providers.js";
 import { supportsAdaptiveReasoningModel } from "../models.js";
 import { modelAvailability } from "../model-availability.js";
 import { conversationStore } from "../store/conversation.js";
@@ -53,7 +54,8 @@ export async function collectOperationalSnapshot(): Promise<OperationalSnapshot>
   }
 
   const consecutiveAuthFailures = modelAvailability.getConsecutiveAuthFailures();
-  const authUnhealthy = consecutiveAuthFailures >= 3;
+  const authUnhealthy = consecutiveAuthFailures >= 3 &&
+    !hasConfiguredExternalProvider();
 
   return {
     healthMetrics,

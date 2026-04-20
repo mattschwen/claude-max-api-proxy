@@ -16,6 +16,7 @@ import { sessionManager } from "../session/manager.js";
 import { log } from "../logger.js";
 import { modelAvailability } from "../model-availability.js";
 import { runtimeConfig } from "../config.js";
+import { getPublicExternalProviderInfos } from "../external-providers.js";
 
 const DEFAULT_PORT = 3456;
 const SHUTDOWN_GRACE_MS = 30000;
@@ -23,6 +24,7 @@ const SHUTDOWN_GRACE_MS = 30000;
 async function main(): Promise<void> {
   console.log("Claude Max API Proxy");
   console.log("====================\n");
+  const externalProviders = getPublicExternalProviderInfos();
 
   const port = parseInt(process.argv[2] || String(DEFAULT_PORT), 10);
   if (isNaN(port) || port < 1 || port > 65535) {
@@ -33,27 +35,65 @@ async function main(): Promise<void> {
   console.log("Checking Claude CLI...");
   const cliCheck = await verifyClaude();
   if (!cliCheck.ok) {
-    console.error(`Error: ${cliCheck.error}`);
-    process.exit(1);
+    if (externalProviders.length === 0) {
+      console.error(`Error: ${cliCheck.error}`);
+      process.exit(1);
+    }
+    console.warn(`  Warning: ${cliCheck.error}`);
+    console.warn(
+      "  Continuing because an external provider is configured.",
+    );
+  } else {
+    console.log(`  Claude CLI: ${cliCheck.version || "OK"}`);
   }
-  console.log(`  Claude CLI: ${cliCheck.version || "OK"}`);
 
   console.log("Checking authentication...");
   const authCheck = await verifyAuth();
   if (!authCheck.ok) {
-    console.error(`Error: ${authCheck.error}`);
-    console.error("Please run: claude auth login");
-    process.exit(1);
+    if (externalProviders.length === 0) {
+      console.error(`Error: ${authCheck.error}`);
+      console.error("Please run: claude auth login");
+      process.exit(1);
+    }
+    console.warn(`  Warning: ${authCheck.error}`);
+    console.warn(
+      "  Claude auth is degraded, but an external provider is available.\n",
+    );
+  } else {
+    console.log("  Authentication: OK\n");
   }
-  console.log("  Authentication: OK\n");
 
   console.log("Checking model access...");
   console.log(`Queue policy: ${runtimeConfig.sameConversationPolicy}`);
   if (runtimeConfig.debugQueues) {
     console.log("Queue debug logging: enabled");
   }
+  if (runtimeConfig.modelFallbacks.length > 0) {
+    console.log(
+      `Model fallback order: ${runtimeConfig.modelFallbacks.join(" -> ")}`,
+    );
+  }
   if (runtimeConfig.defaultAgent) {
     console.log(`Default agent: ${runtimeConfig.defaultAgent}`);
+  }
+  if (externalProviders.length > 0) {
+    for (const provider of externalProviders) {
+      console.log(
+        `External provider: ${provider.provider} -> ${provider.model}`,
+      );
+      if (provider.extraModels && provider.extraModels.length > 0) {
+        console.log(`Additional models: ${provider.extraModels.join(", ")}`);
+      }
+      if (provider.baseUrl) {
+        console.log(`Fallback base URL: ${provider.baseUrl}`);
+      }
+      if (provider.command) {
+        console.log(`Provider command: ${provider.command}`);
+      }
+      if (provider.workdir) {
+        console.log(`Provider workdir: ${provider.workdir}`);
+      }
+    }
   }
   const availability = await modelAvailability.getSnapshot(true);
   if (availability.available.length === 0) {
@@ -61,9 +101,20 @@ async function main(): Promise<void> {
     if (availability.unavailable[0]) {
       console.warn(`  Reason: ${availability.unavailable[0].error.message}`);
     }
-    console.warn(
-      "  The server will start, but /v1/models will be empty and chat requests will fail until model access is restored.\n",
-    );
+    if (runtimeConfig.modelFallbacks.length > 0) {
+      console.warn(
+        `  Fallback probes also failed: ${runtimeConfig.modelFallbacks.join(", ")}`,
+      );
+    }
+    if (externalProviders.length > 0) {
+      console.warn(
+        `  External providers will advertise ${externalProviders.map((provider) => provider.model).join(", ")}. Claude still remains the implicit default; request those model IDs explicitly if you want to route there.\n`,
+      );
+    } else {
+      console.warn(
+        "  The server will start, but /v1/models will be empty and chat requests will fail until model access is restored.\n",
+      );
+    }
   } else {
     console.log(
       `  Models: ${availability.available.map((model) => model.id).join(", ")}\n`,

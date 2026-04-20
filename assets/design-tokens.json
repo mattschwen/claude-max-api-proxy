@@ -1,0 +1,64 @@
+{
+  "primitive": {
+    "color": {
+      "ink-950": "#060814",
+      "ink-900": "#0b1020",
+      "ink-850": "#11182c",
+      "steel-700": "#2a3551",
+      "steel-500": "#6f8bb7",
+      "ice-300": "#9fdfff",
+      "ice-100": "#ebf7ff",
+      "cyan-500": "#2fe6ff",
+      "pink-500": "#ff4fa8",
+      "lime-400": "#74ffb0",
+      "amber-400": "#ffd66b"
+    },
+    "font": {
+      "display": "\"Oxanium\", \"Bank Gothic\", \"Avenir Next Condensed\", sans-serif",
+      "body": "\"Manrope\", \"Avenir Next\", \"Segoe UI Variable\", sans-serif",
+      "mono": "\"IBM Plex Mono\", \"SFMono-Regular\", \"Menlo\", monospace"
+    },
+    "radius": {
+      "lg": "18px",
+      "xl": "24px",
+      "2xl": "32px"
+    },
+    "space": {
+      "4": "16px",
+      "6": "24px"
+    },
+    "shadow": {
+      "panel": "0 22px 68px rgba(3, 7, 18, 0.44)",
+      "elevated": "0 28px 90px rgba(2, 6, 16, 0.56)"
+    },
+    "motion": {
+      "quick": "180ms cubic-bezier(0.16, 1, 0.3, 1)"
+    }
+  },
+  "semantic": {
+    "color": {
+      "canvas": "{primitive.color.ink-950}",
+      "surface": "{primitive.color.ink-900}",
+      "surface-raised": "{primitive.color.ink-850}",
+      "text-primary": "{primitive.color.ice-100}",
+      "text-secondary": "color-mix(in oklab, {primitive.color.ice-100} 82%, {primitive.color.steel-500} 18%)",
+      "text-muted": "color-mix(in oklab, {primitive.color.ice-100} 58%, {primitive.color.steel-500} 42%)",
+      "accent-cyan": "{primitive.color.cyan-500}",
+      "accent-pink": "{primitive.color.pink-500}",
+      "accent-lime": "{primitive.color.lime-400}",
+      "accent-amber": "{primitive.color.amber-400}"
+    }
+  },
+  "component": {
+    "panel": {
+      "radius": "{primitive.radius.xl}",
+      "border": "1px solid rgba(103, 145, 202, 0.18)"
+    },
+    "button": {
+      "radius": "16px",
+      "bg": "linear-gradient(135deg, rgba(18, 27, 49, 0.95), rgba(12, 18, 33, 0.92))",
+      "border": "1px solid rgba(92, 211, 255, 0.2)",
+      "text": "{semantic.color.text-primary}"
+    }
+  }
+}

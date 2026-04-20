@@ -17,6 +17,7 @@ const WARM_DEEP_FORCE_RELEASE_MS = 1_000;
 // per-cycle happy-path success fires every 30s and has zero diagnostic
 // value — it buried structured events in `docker logs`.
 const WARM_SLOW_THRESHOLD_MS = 2000;
+const IS_NODE_TEST = process.execArgv.some((arg) => arg.startsWith("--test"));
 
 class SubprocessPool {
   private warmedAt = 0;
@@ -134,14 +135,20 @@ class SubprocessPool {
 
 export const subprocessPool = new SubprocessPool();
 
-subprocessPool
-  .warm()
-  .catch((err) => logError("pool.warm_failed", err, { phase: "initial" }));
+if (!IS_NODE_TEST) {
+  subprocessPool
+    .warm()
+    .catch((err) => logError("pool.warm_failed", err, { phase: "initial" }));
 
-setInterval(() => {
-  if (!subprocessPool.isWarm()) {
-    subprocessPool
-      .warm()
-      .catch((err) => logError("pool.warm_failed", err, { phase: "interval" }));
+  const poolWarmTimer = setInterval(() => {
+    if (!subprocessPool.isWarm()) {
+      subprocessPool
+        .warm()
+        .catch((err) => logError("pool.warm_failed", err, { phase: "interval" }));
+    }
+  }, WARMUP_INTERVAL_MS);
+
+  if (typeof poolWarmTimer.unref === "function") {
+    poolWarmTimer.unref();
   }
-}, WARMUP_INTERVAL_MS);
+}

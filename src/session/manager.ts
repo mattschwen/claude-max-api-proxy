@@ -240,9 +240,13 @@ sessionManager
   .load()
   .catch((err) => console.error("[SessionManager] Load error:", err));
 
-setInterval(
+const sessionCleanupTimer = setInterval(
   () => {
     sessionManager.cleanup();
   },
   60 * 60 * 1000,
 );
+
+if (typeof sessionCleanupTimer.unref === "function") {
+  sessionCleanupTimer.unref();
+}

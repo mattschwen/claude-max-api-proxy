@@ -17,6 +17,7 @@ const definition: ModelDefinition = {
 function makeManager(
   verifyAuthCalls: Array<() => Promise<{ ok: boolean; error?: string; status?: { loggedIn: boolean } }>>,
   exits: number[],
+  fallbackAliases: string[] = [],
 ): ModelAvailabilityManager {
   let idx = 0;
   return new ModelAvailabilityManager({
@@ -42,6 +43,7 @@ function makeManager(
       },
     }),
     getModelDefinitions: () => [definition],
+    getFallbackAliases: () => fallbackAliases,
     exitProcess: (code: number) => {
       exits.push(code);
     },
@@ -122,4 +124,106 @@ test("ModelAvailabilityManager publishes resolved runtime model ids", async () =
   const publicModels = await manager.getPublicModelList();
 
   assert.deepEqual(publicModels.map((model) => model.id), ["claude-sonnet-4-7"]);
+});
+
+test("ModelAvailabilityManager accepts the default selector as a fallback target", async () => {
+  const exits: number[] = [];
+  const manager = makeManager(
+    [async () => ({ ok: true, status: { loggedIn: true } })],
+    exits,
+    ["default"],
+  );
+
+  const resolved = await manager.resolveRequestedModel("default");
+
+  assert.equal(resolved?.id, "claude-sonnet-4-7");
+});
+
+test("ModelAvailabilityManager falls back when the requested family is unavailable", async () => {
+  const exits: number[] = [];
+  const manager = new ModelAvailabilityManager({
+    verifyClaude: async () => ({ ok: true, version: "claude 2.1.112" }),
+    verifyAuth: async () => ({ ok: true, status: { loggedIn: true } }),
+    probeModelAvailability: async (model) => {
+      if (model === "sonnet") {
+        return {
+          ok: true,
+          model,
+          resolvedModel: "claude-sonnet-4-7",
+        };
+      }
+      return {
+        ok: false,
+        model,
+        error: {
+          status: 400,
+          type: "invalid_request_error",
+          code: "model_unavailable",
+          message: "not available",
+        },
+      };
+    },
+    getModelDefinitions: () => [
+      definition,
+      {
+        id: "opus",
+        family: "opus",
+        alias: "opus",
+        timeoutMs: 1,
+        stallTimeoutMs: 1,
+      },
+    ],
+    getFallbackAliases: () => ["default"],
+    exitProcess: (code: number) => {
+      exits.push(code);
+    },
+  });
+
+  const resolved = await manager.resolveRequestedModel("opus");
+
+  assert.equal(resolved?.id, "claude-sonnet-4-7");
+  assert.equal(resolved?.family, "sonnet");
+});
+
+test("ModelAvailabilityManager probes configured fallback aliases and publishes successful results", async () => {
+  const exits: number[] = [];
+  const manager = new ModelAvailabilityManager({
+    verifyClaude: async () => ({ ok: true, version: "claude 2.1.112" }),
+    verifyAuth: async () => ({ ok: true, status: { loggedIn: true } }),
+    probeModelAvailability: async (model) => {
+      if (model === "sonnet") {
+        return {
+          ok: false,
+          model,
+          error: {
+            status: 400,
+            type: "invalid_request_error",
+            code: "model_unavailable",
+            message: "sonnet unavailable",
+          },
+        };
+      }
+      if (model === "default") {
+        return {
+          ok: true,
+          model,
+          resolvedModel: "claude-haiku-4-5",
+        };
+      }
+      throw new Error(`unexpected probe: ${model}`);
+    },
+    getModelDefinitions: () => [definition],
+    getFallbackAliases: () => ["default"],
+    exitProcess: (code: number) => {
+      exits.push(code);
+    },
+  });
+
+  const publicModels = await manager.getPublicModelList();
+  const resolved = await manager.resolveRequestedModel("default");
+
+  assert.deepEqual(publicModels.map((model) => model.id), ["claude-haiku-4-5"]);
+  assert.equal(resolved?.id, "claude-haiku-4-5");
+  assert.equal(resolved?.alias, "default");
+  assert.equal(resolved?.family, "haiku");
 });
