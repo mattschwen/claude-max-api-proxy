@@ -41,7 +41,7 @@
   "homepage": "https://github.com/mattschwen/claude-max-api-proxy#readme",
   "dependencies": {
     "express": "^5.2.1",
-    "uuid": "^13.0.0"
+    "uuid": "^14.0.0"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",
