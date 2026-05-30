@@ -31,8 +31,8 @@ let stallDetections = 0;
 function hasActiveReasoning(cliInput: CliInput): boolean {
   return Boolean(
     cliInput.thinkingBudget ||
-      cliInput.thinkingEffort ||
-      cliInput.reasoningMode === "adaptive",
+    cliInput.thinkingEffort ||
+    cliInput.reasoningMode === "adaptive",
   );
 }
 
@@ -147,12 +147,15 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
   success: boolean;
   cancelled: boolean;
   authErrored?: boolean;
+  thinkingBlockReplay?: boolean;
 }> {
   const { cliInput, requestId, res, onStall, registerCancel, allowAuthRetry } =
     opts;
 
   const baseTimeout = getModelTimeout(cliInput.model);
-  const hardTimeout = hasActiveReasoning(cliInput) ? baseTimeout * 3 : baseTimeout;
+  const hardTimeout = hasActiveReasoning(cliInput)
+    ? baseTimeout * 3
+    : baseTimeout;
   const stallTimeout = hasActiveReasoning(cliInput)
     ? getStallTimeout(cliInput.model) * 3
     : getStallTimeout(cliInput.model);
@@ -162,6 +165,7 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
     success: boolean;
     cancelled: boolean;
     authErrored?: boolean;
+    thinkingBlockReplay?: boolean;
   }>((resolve) => {
     const subprocess = new ClaudeSubprocess();
     const cleanup = new CleanupSet();
@@ -195,11 +199,18 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
       success: boolean,
       cancelled = false,
       authErrored = false,
+      thinkingBlockReplay = false,
     ): void => {
       if (isComplete) return;
       isComplete = true;
       cleanup.runAll();
-      resolve({ fullResponse, success, cancelled, authErrored });
+      resolve({
+        fullResponse,
+        success,
+        cancelled,
+        authErrored,
+        thinkingBlockReplay,
+      });
     };
 
     const keepaliveId = setInterval(() => {
@@ -303,6 +314,13 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
         reason: "client_disconnected",
       });
       subprocess.kill();
+      // A client disconnect mid-stream leaves the CLI session transcript with a
+      // half-written (partial) thinking block. Resuming that session on the next
+      // turn triggers Anthropic's "thinking blocks ... cannot be modified" 400.
+      // Invalidate the session so the next turn starts fresh.
+      if (cliInput._conversationId) {
+        sessionManager.delete(cliInput._conversationId);
+      }
       if (fullResponse && cliInput._conversationId) {
         try {
           conversationStore.addMessage(
@@ -384,6 +402,26 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
           });
         } catch (error) {
           console.error("[Routes] Metric error:", error);
+        }
+
+        // Thinking-block replay 400: the resumed session transcript contains a
+        // thinking block that the upstream API refuses to reprocess. Delete the
+        // poisoned session and signal the caller to retry once with a fresh
+        // (non-resume) session. Don't write the error or end the response — the
+        // fallback retry path in handleStreamingResponse owns the recovery.
+        const thinkingReplay =
+          cliError.code === "thinking_block_replay" &&
+          cliInput.isResume === true &&
+          Boolean(cliInput._conversationId);
+        if (thinkingReplay && cliInput._conversationId) {
+          log("request.retry", {
+            requestId,
+            conversationId: cliInput._conversationId,
+            reason: "thinking_block_replay_recover",
+          });
+          sessionManager.delete(cliInput._conversationId);
+          finish(false, false, false, true);
+          return;
         }
 
         const authErr = allowAuthRetry && isAuthError(cliError);
@@ -528,30 +566,36 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
     });
 
     if (!isComplete) {
-      subprocess.start(cliInput.prompt, {
-        model: cliInput.model,
-        sessionId: cliInput.sessionId,
-        systemPrompt: cliInput.systemPrompt,
-        isResume: cliInput.isResume,
-        thinkingBudget: cliInput.thinkingBudget,
-        thinkingEffort: cliInput.thinkingEffort,
-        reasoningMode: cliInput.reasoningMode,
-      }).catch((error: Error) => {
-        logError("request.error", error, {
-          requestId,
-          reason: "subprocess_start_failed",
+      subprocess
+        .start(cliInput.prompt, {
+          model: cliInput.model,
+          sessionId: cliInput.sessionId,
+          systemPrompt: cliInput.systemPrompt,
+          isResume: cliInput.isResume,
+          thinkingBudget: cliInput.thinkingBudget,
+          thinkingEffort: cliInput.thinkingEffort,
+          reasoningMode: cliInput.reasoningMode,
+        })
+        .catch((error: Error) => {
+          logError("request.error", error, {
+            requestId,
+            reason: "subprocess_start_failed",
+          });
+          if (!clientDisconnected && !res.writableEnded) {
+            res.write(
+              `data: ${JSON.stringify({
+                error: {
+                  message: error.message,
+                  type: "server_error",
+                  code: null,
+                },
+              })}\n\n`,
+            );
+            res.write("data: [DONE]\n\n");
+            res.end();
+          }
+          finish(false);
         });
-        if (!clientDisconnected && !res.writableEnded) {
-          res.write(
-            `data: ${JSON.stringify({
-              error: { message: error.message, type: "server_error", code: null },
-            })}\n\n`,
-          );
-          res.write("data: [DONE]\n\n");
-          res.end();
-        }
-        finish(false);
-      });
     }
   });
 }
@@ -595,6 +639,7 @@ export async function handleStreamingResponse(
     log("request.retry", {
       requestId,
       conversationId: cliInput._conversationId,
+      reason: result.thinkingBlockReplay ? "thinking_block_replay" : undefined,
     });
 
     const retryCli: CliInput = { ...cliInput };
@@ -797,24 +842,30 @@ async function runNonStreamingSubprocess(
     });
 
     if (!isComplete) {
-      subprocess.start(cliInput.prompt, {
-        model: cliInput.model,
-        sessionId: cliInput.sessionId,
-        systemPrompt: cliInput.systemPrompt,
-        isResume: cliInput.isResume,
-        thinkingBudget: cliInput.thinkingBudget,
-        thinkingEffort: cliInput.thinkingEffort,
-        reasoningMode: cliInput.reasoningMode,
-      }).catch((error: Error) => {
-        isComplete = true;
-        cleanup.runAll();
-        if (!res.headersSent) {
-          res.status(500).json({
-            error: { message: error.message, type: "server_error", code: null },
-          });
-        }
-        done();
-      });
+      subprocess
+        .start(cliInput.prompt, {
+          model: cliInput.model,
+          sessionId: cliInput.sessionId,
+          systemPrompt: cliInput.systemPrompt,
+          isResume: cliInput.isResume,
+          thinkingBudget: cliInput.thinkingBudget,
+          thinkingEffort: cliInput.thinkingEffort,
+          reasoningMode: cliInput.reasoningMode,
+        })
+        .catch((error: Error) => {
+          isComplete = true;
+          cleanup.runAll();
+          if (!res.headersSent) {
+            res.status(500).json({
+              error: {
+                message: error.message,
+                type: "server_error",
+                code: null,
+              },
+            });
+          }
+          done();
+        });
     }
   });
 }

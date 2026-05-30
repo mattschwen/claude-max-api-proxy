@@ -109,7 +109,9 @@ class SubprocessRegistry {
   getActiveSnapshots(now = Date.now()): ActiveSubprocessSnapshot[] {
     return Array.from(this.active.values())
       .map((subprocess) => subprocess.getActiveSnapshot(now))
-      .filter((snapshot): snapshot is ActiveSubprocessSnapshot => snapshot !== null)
+      .filter(
+        (snapshot): snapshot is ActiveSubprocessSnapshot => snapshot !== null,
+      )
       .sort((left, right) => right.uptimeMs - left.uptimeMs);
   }
 
@@ -170,10 +172,11 @@ export class ClaudeSubprocess extends EventEmitter {
         this.process.stdin?.end();
 
         const pid = this.process.pid;
-        const effort = options.thinkingEffort ||
+        const effort =
+          options.thinkingEffort ||
           (options.thinkingBudget
-          ? thinkingBudgetToEffort(options.thinkingBudget)
-          : undefined);
+            ? thinkingBudgetToEffort(options.thinkingBudget)
+            : undefined);
         this.startedAt = Date.now();
         this.model = options.model;
         this.reasoningMode = options.reasoningMode ?? "off";
@@ -200,10 +203,7 @@ export class ClaudeSubprocess extends EventEmitter {
         this.process.stderr?.on("data", (chunk: Buffer) => {
           const errorText = chunk.toString().trim();
           if (errorText && process.env.DEBUG) {
-            console.error(
-              "[Subprocess stderr]:",
-              errorText.slice(0, 200),
-            );
+            console.error("[Subprocess stderr]:", errorText.slice(0, 200));
           }
         });
 
@@ -266,14 +266,21 @@ export class ClaudeSubprocess extends EventEmitter {
       finalPrompt = `<instructions>\n${options.systemPrompt}\n</instructions>\n\n${prompt}`;
     }
 
-    if (options.model === "opus") {
+    // Don't add a fallback model when extended thinking is active. A mid-turn
+    // fallback (opus -> sonnet) produces a thinking block with a different
+    // signature; resuming the next turn against that mismatched block triggers
+    // Anthropic's "thinking blocks ... cannot be modified" 400. Keeping the
+    // model stable preserves thinking-block continuity across resumes.
+    const hasThinking = !!(options.thinkingEffort || options.thinkingBudget);
+    if (options.model === "opus" && !hasThinking) {
       args.push("--fallback-model", "sonnet");
     }
 
     // Map thinking budget (token count) to Claude CLI's --effort levels.
     // The CLI no longer supports a raw token budget; only level-based effort.
     // Mapping matches the inverse of REASONING_EFFORT_MAP in routes.ts.
-    const level = options.thinkingEffort ||
+    const level =
+      options.thinkingEffort ||
       (options.thinkingBudget
         ? thinkingBudgetToEffort(options.thinkingBudget)
         : undefined);
