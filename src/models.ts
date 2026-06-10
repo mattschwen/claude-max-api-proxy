@@ -7,7 +7,7 @@
  * probing resolves the current exact IDs dynamically.
  */
 
-export type ModelFamily = "opus" | "sonnet" | "haiku";
+export type ModelFamily = "opus" | "sonnet" | "haiku" | "fable";
 export type SpecialModelAlias = "default";
 
 export interface ModelDefinition {
@@ -41,6 +41,17 @@ const MODEL_DEFINITIONS: ModelDefinition[] = [
     stallTimeoutMs: 120000,
   },
   {
+    // `fable` is a CLI-resolved alias for the latest Fable model
+    // (e.g. `claude-fable-5`), mirroring how `opus`/`sonnet`/`haiku` work.
+    // The Claude CLI owns the exact versioned ID; we only carry the alias
+    // and a flagship-tier timeout policy here.
+    id: "fable",
+    family: "fable",
+    alias: "fable",
+    timeoutMs: 1800000,
+    stallTimeoutMs: 120000,
+  },
+  {
     id: "haiku",
     family: "haiku",
     alias: "haiku",
@@ -62,6 +73,7 @@ const FAMILY_PATTERNS: Record<ModelFamily, RegExp> = {
   opus: /(?:^|[/:._-])opus(?:$|[/:._-])/i,
   sonnet: /(?:^|[/:._-])sonnet(?:$|[/:._-])/i,
   haiku: /(?:^|[/:._-])haiku(?:$|[/:._-])/i,
+  fable: /(?:^|[/:._-])fable(?:$|[/:._-])/i,
 };
 
 function getModelConfig(family: ModelFamily): ModelDefinition {
