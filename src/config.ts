@@ -261,6 +261,11 @@ export interface ProxyRuntimeConfig {
   enableAdminApi: boolean;
   defaultThinkingBudget: string | undefined;
   defaultAgent: string | undefined;
+  /** Optional path to a file whose contents are injected as a global ("house")
+   *  system prompt — via the proxy's <instructions> wrapper, NOT --system-prompt
+   *  (which trips Anthropic's third-party classifier). Set with
+   *  CLAUDE_PROXY_SYSTEM_PROMPT_FILE. */
+  systemPromptFile: string | undefined;
   maxConcurrentRequests: number;
   modelFallbacks: string[];
   geminiCliFallback: GeminiCliFallbackConfig | null;
@@ -318,6 +323,7 @@ export function readRuntimeConfig(
     enableAdminApi: parseBoolean(env.CLAUDE_PROXY_ENABLE_ADMIN_API, false),
     defaultThinkingBudget: persistedDefault ?? envDefault,
     defaultAgent: env.CLAUDE_PROXY_DEFAULT_AGENT?.trim() || undefined,
+    systemPromptFile: env.CLAUDE_PROXY_SYSTEM_PROMPT_FILE?.trim() || undefined,
     maxConcurrentRequests: parsePositiveInt(
       env.CLAUDE_PROXY_MAX_CONCURRENT_REQUESTS,
       defaultMaxConcurrentRequests(),

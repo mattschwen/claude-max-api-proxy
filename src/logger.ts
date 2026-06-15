@@ -37,7 +37,8 @@ export type LogEvent =
   | "auth.recovered"
   | "cli.error"
   | "pool.warmed"
-  | "pool.warm_failed";
+  | "pool.warm_failed"
+  | "system_prompt_file.unreadable";
 
 export interface LogEntry {
   ts: string;
