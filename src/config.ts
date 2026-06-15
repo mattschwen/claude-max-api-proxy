@@ -261,10 +261,6 @@ export interface ProxyRuntimeConfig {
   enableAdminApi: boolean;
   defaultThinkingBudget: string | undefined;
   defaultAgent: string | undefined;
-  /** Optional path to a file whose contents are injected as a global ("house")
-   *  system prompt — via the proxy's <instructions> wrapper, NOT --system-prompt
-   *  (which trips Anthropic's third-party classifier). Set with
-   *  CLAUDE_PROXY_SYSTEM_PROMPT_FILE. */
   systemPromptFile: string | undefined;
   maxConcurrentRequests: number;
   modelFallbacks: string[];
