@@ -24,6 +24,8 @@ import type {
 import type { ClaudeModel } from "../adapter/openai-to-cli.js";
 import { log } from "../logger.js";
 import { resolveModelFamily } from "../models.js";
+import { runtimeConfig } from "../config.js";
+import { readFileSync, statSync } from "fs";
 import {
   prepareClaudeSpawn,
   getCleanClaudeEnv,
@@ -37,6 +39,45 @@ import {
 } from "../reasoning.js";
 
 const KILL_ESCALATION_MS = 5000;
+
+// Optional global ("house") system prompt sourced from a file
+// (CLAUDE_PROXY_SYSTEM_PROMPT_FILE). It is injected into the proxy's
+// <instructions> wrapper in the USER message on every request — deliberately
+// NOT via --system-prompt, which trips Anthropic's third-party-apps classifier
+// (see buildArgs below). Cached by mtime so edits to the file apply on the next
+// request without a restart.
+let housePromptCache:
+  | { path: string; mtimeMs: number; content: string }
+  | null = null;
+let housePromptWarnedPath: string | null = null;
+
+function getHouseSystemPrompt(): string {
+  const filePath = runtimeConfig.systemPromptFile;
+  if (!filePath) return "";
+  try {
+    const { mtimeMs } = statSync(filePath);
+    if (
+      housePromptCache &&
+      housePromptCache.path === filePath &&
+      housePromptCache.mtimeMs === mtimeMs
+    ) {
+      return housePromptCache.content;
+    }
+    const content = readFileSync(filePath, "utf8").trim();
+    housePromptCache = { path: filePath, mtimeMs, content };
+    housePromptWarnedPath = null;
+    return content;
+  } catch (err) {
+    if (housePromptWarnedPath !== filePath) {
+      housePromptWarnedPath = filePath;
+      log("system_prompt_file.unreadable", {
+        path: filePath,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return "";
+  }
+}
 
 export interface ActiveSubprocessSnapshot {
   pid: number;
@@ -261,9 +302,16 @@ export class ClaudeSubprocess extends EventEmitter {
     // system prompt inside the user message, wrapped in <instructions> tags. The
     // first-party sentinel is what the classifier keys on, so the request sails
     // through while the model still follows the embedded instructions.
+    // Merge the optional global house prompt (CLAUDE_PROXY_SYSTEM_PROMPT_FILE)
+    // ahead of any per-request client system prompt, then wrap both in the
+    // <instructions> block embedded in the user message.
+    const housePrompt = getHouseSystemPrompt();
+    const combinedSystem = [housePrompt, options.systemPrompt]
+      .filter((part) => part && part.trim())
+      .join("\n\n");
     let finalPrompt = prompt;
-    if (options.systemPrompt) {
-      finalPrompt = `<instructions>\n${options.systemPrompt}\n</instructions>\n\n${prompt}`;
+    if (combinedSystem) {
+      finalPrompt = `<instructions>\n${combinedSystem}\n</instructions>\n\n${prompt}`;
     }
 
     // Don't add a fallback model when extended thinking is active. A mid-turn

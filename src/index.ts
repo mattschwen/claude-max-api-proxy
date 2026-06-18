@@ -29,6 +29,7 @@ interface ModelDef {
 function getModelName(model: ModelDefinition): string {
   if (model.family === "opus") return "Claude Opus";
   if (model.family === "haiku") return "Claude Haiku";
+  if (model.family === "fable") return "Claude Fable";
   return "Claude Sonnet";
 }
 
@@ -37,7 +38,7 @@ function buildModelDefinition(model: ModelDefinition): ModelDef {
     id: model.id,
     name: getModelName(model),
     api: "openai-completions",
-    reasoning: model.family === "opus",
+    reasoning: model.family === "opus" || model.family === "fable",
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 200000,
