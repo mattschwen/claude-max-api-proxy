@@ -30,7 +30,7 @@ test("readGeminiCliJsonUsage derives OpenAI usage from Gemini JSON stats", () =>
     {
       stats: {
         models: {
-          "gemini-2.5-pro": {
+          "gemini-3.1-pro-preview": {
             tokens: {
               prompt: 120,
               candidates: 18,
@@ -99,7 +99,7 @@ test("buildGeminiCliChatCompletion returns an OpenAI chat completion payload", (
       response: "OK",
       stats: {
         models: {
-          "gemini-2.5-pro": {
+          "gemini-3.1-pro-preview": {
             tokens: {
               prompt: 10,
               candidates: 1,
@@ -109,7 +109,7 @@ test("buildGeminiCliChatCompletion returns an OpenAI chat completion payload", (
         },
       },
     },
-    "gemini-2.5-pro",
+    "gemini-3.1-pro-preview",
     "req123",
     1_700_000_000_000,
   );
@@ -118,7 +118,7 @@ test("buildGeminiCliChatCompletion returns an OpenAI chat completion payload", (
     id: "chatcmpl-req123",
     object: "chat.completion",
     created: 1_700_000_000,
-    model: "gemini-2.5-pro",
+    model: "gemini-3.1-pro-preview",
     choices: [
       {
         index: 0,
@@ -142,8 +142,8 @@ test("GeminiCliProvider advertises default and extra local CLI models", () => {
     {
       provider: "gemini-cli",
       command: "/opt/homebrew/bin/gemini",
-      model: "gemini-2.5-pro",
-      extraModels: ["gemini-2.5-flash"],
+      model: "gemini-3.1-pro-preview",
+      extraModels: ["gemini-3.6-flash"],
       workdir: "/tmp/gemini-proxy",
       streamMode: "passthrough",
     },
@@ -153,19 +153,19 @@ test("GeminiCliProvider advertises default and extra local CLI models", () => {
     },
   );
 
-  assert.equal(provider.supportsModel("gemini-2.5-pro"), true);
-  assert.equal(provider.supportsModel("maxproxy/gemini-2.5-flash"), true);
-  assert.equal(provider.resolveModel("GEMINI-2.5-FLASH"), "gemini-2.5-flash");
-  assert.equal(provider.resolveModel(undefined), "gemini-2.5-pro");
+  assert.equal(provider.supportsModel("gemini-3.1-pro-preview"), true);
+  assert.equal(provider.supportsModel("maxproxy/gemini-3.6-flash"), true);
+  assert.equal(provider.resolveModel("GEMINI-3.6-FLASH"), "gemini-3.6-flash");
+  assert.equal(provider.resolveModel(undefined), "gemini-3.1-pro-preview");
   assert.deepEqual(provider.getPublicModelList(), [
     {
-      id: "gemini-2.5-pro",
+      id: "gemini-3.1-pro-preview",
       object: "model",
       owned_by: "gemini-cli",
       created: 1_700_000_000,
     },
     {
-      id: "gemini-2.5-flash",
+      id: "gemini-3.6-flash",
       object: "model",
       owned_by: "gemini-cli",
       created: 1_700_000_000,
@@ -174,17 +174,20 @@ test("GeminiCliProvider advertises default and extra local CLI models", () => {
   assert.deepEqual(provider.getPublicInfo(), {
     provider: "gemini-cli",
     transport: "local-cli",
-    model: "gemini-2.5-pro",
-    extraModels: ["gemini-2.5-flash"],
+    model: "gemini-3.1-pro-preview",
+    extraModels: ["gemini-3.6-flash"],
     streamMode: "passthrough",
     command: "/opt/homebrew/bin/gemini",
     workdir: "/tmp/gemini-proxy",
   });
   assert.equal(
-    provider.getModelDescriptor("gemini-2.5-flash")?.capabilities.streaming,
+    provider.getModelDescriptor("gemini-3.6-flash")?.capabilities.streaming,
     true,
   );
-  assert.equal(provider.getModelDescriptor("gemini-2.5-pro")?.timeoutMs, 180000);
+  assert.equal(
+    provider.getModelDescriptor("gemini-3.1-pro-preview")?.timeoutMs,
+    180000,
+  );
   assert.equal(provider.getAvailability().state, "unknown");
 });
 

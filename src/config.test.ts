@@ -171,8 +171,8 @@ test("parseGeminiCliFallbackConfig enables local Gemini CLI with defaults", () =
 
 test("parseGeminiCliFallbackConfig supports extra advertised models", () => {
   const fallback = parseGeminiCliFallbackConfig({
-    GEMINI_CLI_MODEL: "gemini-2.5-pro",
-    GEMINI_CLI_EXTRA_MODELS: "gemini-2.5-flash, gemini-2.5-pro",
+    GEMINI_CLI_MODEL: "gemini-3.1-pro-preview",
+    GEMINI_CLI_EXTRA_MODELS: "gemini-3.6-flash, gemini-3.1-pro-preview",
     GEMINI_CLI_COMMAND: "/opt/homebrew/bin/gemini",
     GEMINI_CLI_WORKDIR: "/tmp/gemini-proxy",
     GEMINI_CLI_STREAM_MODE: "synthetic",
@@ -181,8 +181,8 @@ test("parseGeminiCliFallbackConfig supports extra advertised models", () => {
   assert.deepEqual(fallback, {
     provider: "gemini-cli",
     command: "/opt/homebrew/bin/gemini",
-    model: "gemini-2.5-pro",
-    extraModels: ["gemini-2.5-flash"],
+    model: "gemini-3.1-pro-preview",
+    extraModels: ["gemini-3.6-flash"],
     workdir: "/tmp/gemini-proxy",
     streamMode: "synthetic",
   });
@@ -273,7 +273,7 @@ test("readRuntimeConfig parses explicit external fallback config", () => {
       OPENAI_COMPAT_FALLBACK_BASE_URL:
         "https://generativelanguage.googleapis.com/v1beta/openai",
       OPENAI_COMPAT_FALLBACK_API_KEY: "secret",
-      OPENAI_COMPAT_FALLBACK_MODEL: "gemini-2.5-flash",
+      OPENAI_COMPAT_FALLBACK_MODEL: "gemini-3.6-flash",
     },
     undefined,
   );
@@ -282,7 +282,7 @@ test("readRuntimeConfig parses explicit external fallback config", () => {
     provider: "google",
     baseUrl: GEMINI_OPENAI_BASE_URL,
     apiKey: "secret",
-    model: "gemini-2.5-flash",
+    model: "gemini-3.6-flash",
     streamMode: "synthetic",
   });
 });
@@ -331,7 +331,7 @@ test("parseExternalProviderConfigs supports multiple named providers and models"
         provider: "openrouter",
         baseUrl: "https://openrouter.ai/api/v1",
         apiKeyEnv: "OPENROUTER_API_KEY",
-        models: ["openrouter/google/gemini-3-pro"],
+        models: ["openrouter/google/gemini-3.1-pro-preview"],
         streamMode: "passthrough",
       },
     ]),

@@ -21,12 +21,12 @@ test("sanitizeFallbackChatRequestBody strips proxy-only reasoning fields", () =>
       output_config: { effort: "high" },
       temperature: 0.2,
     },
-    "gemini-2.5-flash",
+    "gemini-3.6-flash",
     { stream: false },
   );
 
   assert.deepEqual(body, {
-    model: "gemini-2.5-flash",
+    model: "gemini-3.6-flash",
     messages: [{ role: "user", content: "Hi" }],
     stream: false,
     temperature: 0.2,

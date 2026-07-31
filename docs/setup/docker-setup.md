@@ -77,8 +77,8 @@ All settings go in `.env`. See `.env.example` for defaults.
 | `OPEN_WEBUI_TASK_MODEL_EXTERNAL` | `sonnet` | Default model Open WebUI requests |
 | `GEMINI_CLI_ENABLED` | _(unset)_ | Enable the local Gemini CLI provider when the proxy is running on the host, or inside the container if you have installed/authenticated Gemini there |
 | `GEMINI_CLI_COMMAND` | `gemini` | Gemini CLI executable path |
-| `GEMINI_CLI_MODEL` | `gemini-2.5-pro` when Gemini CLI is enabled | Default local Gemini CLI model advertised for explicit Gemini requests |
-| `GEMINI_CLI_EXTRA_MODELS` | _(unset)_ | Additional local Gemini CLI models to advertise, such as `gemini-2.5-flash` |
+| `GEMINI_CLI_MODEL` | `auto` when Gemini CLI is enabled | Default local Gemini CLI model advertised for explicit Gemini requests |
+| `GEMINI_CLI_EXTRA_MODELS` | _(unset)_ | Additional local Gemini CLI models to advertise, such as `gemini-3.1-pro-preview,gemini-3.6-flash` |
 | `GEMINI_CLI_WORKDIR` | host/container temp dir | Isolated workdir used for Gemini CLI requests |
 | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | _(unset)_ | Advertises the Gemini OpenAI-compatible provider inside the proxy |
 | `ZAI_API_KEY` / `BIGMODEL_API_KEY` | _(unset)_ | Advertises the Z.AI / GLM provider inside the proxy |
@@ -162,9 +162,9 @@ intentionally, the CLI-first path is:
 ```bash
 GEMINI_CLI_ENABLED=true
 GEMINI_CLI_COMMAND=/opt/homebrew/bin/gemini
-GEMINI_CLI_MODEL=gemini-2.5-pro
-GEMINI_CLI_EXTRA_MODELS=gemini-2.5-flash
-OPEN_WEBUI_TASK_MODEL_EXTERNAL=gemini-2.5-flash
+GEMINI_CLI_MODEL=auto
+GEMINI_CLI_EXTRA_MODELS=gemini-3.1-pro-preview,gemini-3.6-flash
+OPEN_WEBUI_TASK_MODEL_EXTERNAL=gemini-3.6-flash
 ```
 
 If you specifically want the containerized proxy to advertise a hosted GLM

@@ -55,7 +55,7 @@ test("isClaudeModelRequest keeps omitted and Claude-family selections on the Cla
   assert.equal(isClaudeModelRequest("claude-sonnet-4-7"), true);
   assert.equal(isClaudeModelRequest("opus[1m]"), true);
   assert.equal(isClaudeModelRequest("fable"), true);
-  assert.equal(isClaudeModelRequest("gemini-2.5-pro"), false);
+  assert.equal(isClaudeModelRequest("gemini-3.1-pro-preview"), false);
   assert.equal(isClaudeModelRequest("glm-4.7-flash"), false);
 });
 

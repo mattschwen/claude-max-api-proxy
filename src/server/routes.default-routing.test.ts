@@ -6,7 +6,7 @@ test("chat completions keep Claude as the implicit default even when an external
   const previousGeminiModel = process.env.GEMINI_CLI_MODEL;
 
   process.env.GEMINI_CLI_ENABLED = "true";
-  process.env.GEMINI_CLI_MODEL = "gemini-2.5-pro";
+  process.env.GEMINI_CLI_MODEL = "gemini-3.1-pro-preview";
 
   try {
     const routes = await import("./routes.js");

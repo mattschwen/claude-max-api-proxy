@@ -17,11 +17,11 @@ All runtime configuration is driven by environment variables. Set them **before*
 | `CLAUDE_PROXY_MODEL_FALLBACKS` | _(unset)_ | comma-separated Claude selectors, e.g. `default,haiku` | When the requested model is unavailable, try these selectors in order before returning `model_unavailable`. |
 | `GEMINI_CLI_ENABLED` | `false` unless `GEMINI_CLI_MODEL` / `GEMINI_CLI_EXTRA_MODELS` is set | `true`, `false` | Enable the local Gemini CLI provider. This is the CLI-first proxy path and does not need an API key. |
 | `GEMINI_CLI_COMMAND` | `gemini` | executable path | Which local Gemini CLI binary the proxy should launch. |
-| `GEMINI_CLI_MODEL` | `gemini-2.5-pro` when Gemini CLI is enabled | model id | Default Gemini CLI model advertised for explicit Gemini routing. |
-| `GEMINI_CLI_EXTRA_MODELS` | _(unset)_ | comma-separated model ids | Additional Gemini CLI models to advertise on `/v1/models`, for example `gemini-2.5-flash`. |
+| `GEMINI_CLI_MODEL` | `auto` when Gemini CLI is enabled | model id or CLI alias | Default Gemini CLI model advertised for explicit Gemini routing. `auto` lets the installed CLI choose from currently available models. |
+| `GEMINI_CLI_EXTRA_MODELS` | _(unset)_ | comma-separated model ids | Additional Gemini CLI models to advertise on `/v1/models`, for example `gemini-3.1-pro-preview,gemini-3.6-flash`. |
 | `GEMINI_CLI_WORKDIR` | `os.tmpdir()/claude-max-api-proxy-gemini-cli` | filesystem path | Isolated working directory used when launching the Gemini CLI in read-only plan mode. |
 | `GEMINI_CLI_STREAM_MODE` | `passthrough` | `passthrough`, `synthetic` | How streamed Gemini CLI requests are handled. `passthrough` converts Gemini `stream-json` into OpenAI SSE live. |
-| `GEMINI_API_KEY` / `GOOGLE_API_KEY` | _(unset)_ | Google AI Studio API key | Advertises a Gemini OpenAI-compatible provider using `https://generativelanguage.googleapis.com/v1beta/openai` and default model `gemini-2.5-flash`. |
+| `GEMINI_API_KEY` / `GOOGLE_API_KEY` | _(unset)_ | Google AI Studio API key | Advertises a Gemini OpenAI-compatible provider using `https://generativelanguage.googleapis.com/v1beta/openai` and default model `gemini-3.6-flash`. |
 | `ZAI_API_KEY` / `BIGMODEL_API_KEY` | _(unset)_ | Z.AI API key | Advertises a Z.AI OpenAI-compatible provider using `https://api.z.ai/api/paas/v4` and default model `glm-4.7-flash`. |
 | `ZAI_MODEL` | `glm-4.7-flash` when Z.AI is inferred | model id | Which Z.AI / GLM model the proxy should advertise as its external model. |
 | `ZAI_BASE_URL` | `https://api.z.ai/api/paas/v4` when Z.AI is inferred | OpenAI-compatible base URL | Override the Z.AI endpoint directly. |
@@ -199,9 +199,9 @@ the local authenticated `gemini` CLI instead of a hosted API key:
 ```bash
 export GEMINI_CLI_ENABLED=true
 export GEMINI_CLI_COMMAND=/opt/homebrew/bin/gemini
-export GEMINI_CLI_MODEL=gemini-2.5-pro
-export GEMINI_CLI_EXTRA_MODELS=gemini-2.5-flash
-export OPEN_WEBUI_TASK_MODEL_EXTERNAL=gemini-2.5-flash
+export GEMINI_CLI_MODEL=auto
+export GEMINI_CLI_EXTRA_MODELS=gemini-3.1-pro-preview,gemini-3.6-flash
+export OPEN_WEBUI_TASK_MODEL_EXTERNAL=gemini-3.6-flash
 npm start
 ```
 
@@ -236,7 +236,7 @@ That is equivalent to:
 export OPENAI_COMPAT_FALLBACK_PROVIDER=google
 export OPENAI_COMPAT_FALLBACK_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
 export OPENAI_COMPAT_FALLBACK_API_KEY=your-google-ai-studio-key
-export OPENAI_COMPAT_FALLBACK_MODEL=gemini-2.5-flash
+export OPENAI_COMPAT_FALLBACK_MODEL=gemini-3.6-flash
 npm start
 ```
 
@@ -283,7 +283,7 @@ export OPENAI_COMPAT_PROVIDERS_JSON='[
     "provider": "openrouter",
     "baseUrl": "https://openrouter.ai/api/v1",
     "apiKeyEnv": "OPENROUTER_API_KEY",
-    "models": ["openrouter/google/gemini-3-pro"],
+    "models": ["openrouter/google/gemini-3.1-pro-preview"],
     "streamMode": "passthrough"
   }
 ]'

@@ -21,9 +21,9 @@ their configured model IDs.
 <p>
   <a href="#quick-start"><b>Quick start</b></a>
   ·
-  <a href="#how-routing-works"><b>Routing</b></a>
+  <a href="#compare-the-options"><b>Compare</b></a>
   ·
-  <a href="#connect-a-provider"><b>Providers</b></a>
+  <a href="#client-integrations"><b>Client setup</b></a>
   ·
   <a href="./docs/reference/API.md"><b>API reference</b></a>
 </p>
@@ -37,6 +37,18 @@ their configured model IDs.
 Claw Proxy turns authenticated AI CLIs and configured model providers into a
 local OpenAI-compatible service. Point an existing editor, SDK, agent, or chat
 frontend at a new `baseURL`; keep the rest of your workflow.
+
+## Why Claw Proxy
+
+Most editors, agents, and SDKs already speak the OpenAI API. Claude Code and
+Gemini CLI already know who you are. Claw Proxy connects those two sides
+without making you rebuild your toolchain.
+
+| You already have | The mismatch | Claw Proxy adds |
+| --- | --- | --- |
+| An authenticated Claude Code or Gemini CLI session | Your client asks for an OpenAI-compatible URL | One local endpoint with explicit provider routing |
+| Provider credentials and model IDs | Every provider has different setup | One model catalog and one client configuration |
+| Long-running agent workflows | CLIs and API clients track state differently | Durable conversations, queues, cancellation, and metrics |
 
 ## Quick Start
 
@@ -161,10 +173,14 @@ External models never silently replace Claude. If the Claude path is
 unavailable, a Claude-default request returns a Claude error instead of
 quietly sending the prompt elsewhere.
 
-## Built for Real Agent Workloads
+## What You Get
 
-- **OpenAI-shaped interfaces.** Streaming and non-streaming Chat Completions,
-  plus a non-streaming Responses compatibility surface.
+- **Keep your toolchain.** Continue, Aider, Open WebUI, OpenAI SDKs, `curl`,
+  and custom agents only need a new base URL.
+- **Reuse authenticated CLIs.** Route through local Claude Code or Gemini CLI
+  sessions without adding a provider API key for those paths.
+- **Use OpenAI-shaped interfaces.** Stream Chat Completions or use the
+  non-streaming Responses compatibility surface.
 - **Runtime model discovery.** `/v1/models` reports the Claude IDs the installed
   CLI can actually use alongside configured external models.
 - **Durable conversations.** Stable conversation IDs, committed checkpoints,
@@ -176,6 +192,22 @@ quietly sending the prompt elsewhere.
   capabilities, scrape Prometheus metrics, and use the built-in operator UI.
 - **Agent-ready discovery.** Capability metadata describes available models,
   reasoning inputs, provider state, and the built-in `expert-coder` profile.
+
+## Compare the Options
+
+This comparison is for connecting OpenAI-compatible developer tools to the
+providers and authenticated CLIs you already use.
+
+| Capability | Claw Proxy | Direct provider API | CLI alone |
+| --- | :---: | :---: | :---: |
+| One OpenAI-compatible base URL | Yes | One per provider | No HTTP endpoint |
+| Reuse Claude Code or Gemini CLI login | Yes | No | Yes |
+| Route multiple providers by model ID | Built in | Client-managed | No |
+| Streaming Chat Completions | Yes | Provider-dependent | CLI stream only |
+| Responses API compatibility | Non-streaming | Provider-dependent | No HTTP endpoint |
+| Durable conversation routing | Built in | Client-managed | CLI-native |
+| Health, metrics, cancellation, and operator UI | Built in | Provider-specific | No |
+| Docker required | No | No | No |
 
 ## API Surface
 
@@ -219,12 +251,16 @@ Use a local authenticated Gemini CLI session without a hosted API key:
 
 ```bash
 export GEMINI_CLI_ENABLED=true
-export GEMINI_CLI_MODEL=gemini-2.5-pro
-export GEMINI_CLI_EXTRA_MODELS=gemini-2.5-flash
+# `auto` lets the installed Gemini CLI select a currently available model.
+export GEMINI_CLI_MODEL=auto
 npm start
 ```
 
-Request `gemini-2.5-pro` or `gemini-2.5-flash` to use that route.
+Request `auto` to use that route. To expose specific models instead, set
+`GEMINI_CLI_MODEL` and `GEMINI_CLI_EXTRA_MODELS` to IDs supported by your
+installed CLI. Google recommends the CLI's
+[`auto` model selection](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/model.md)
+because model availability changes over time.
 
 ### OpenAI-compatible HTTP — explicit
 
@@ -235,7 +271,7 @@ be registered as an explicit provider:
 export OPENAI_COMPAT_FALLBACK_PROVIDER=openai
 export OPENAI_COMPAT_FALLBACK_BASE_URL=https://api.openai.com/v1
 export OPENAI_COMPAT_FALLBACK_API_KEY=your-api-key
-export OPENAI_COMPAT_FALLBACK_MODEL=your-model-id
+export OPENAI_COMPAT_FALLBACK_MODEL=your-current-model-id
 npm start
 ```
 
@@ -245,6 +281,73 @@ headers, timeouts, and capability metadata, use
 `OPENAI_COMPAT_PROVIDERS_JSON`.
 
 [Provider configuration →](./docs/reference/CONFIGURATION.md#external-openai-compatible-provider)
+
+## Client Integrations
+
+Use the same connection details everywhere; choose a model from
+`GET /v1/models` instead of copying an ID from an old example.
+
+| Client | Provider type | Base URL | API key |
+| --- | --- | --- | --- |
+| Continue | OpenAI-compatible | `http://127.0.0.1:3456/v1` | Any non-empty value |
+| Aider | OpenAI-compatible | `http://127.0.0.1:3456/v1` | Any non-empty value |
+| Open WebUI | OpenAI | `http://host.docker.internal:3456/v1` from Docker | Any non-empty value |
+| OpenAI Python / TypeScript SDK | OpenAI | `http://127.0.0.1:3456/v1` | Any non-empty value |
+| Custom agents | Chat Completions or Responses | `http://127.0.0.1:3456/v1` | Any non-empty value |
+
+<details>
+<summary><b>Continue configuration</b></summary>
+
+```yaml
+name: Claw Proxy
+version: 1.0.0
+schema: v1
+
+models:
+  - name: Claw Proxy
+    provider: openai
+    model: sonnet
+    apiBase: http://127.0.0.1:3456/v1
+    apiKey: local
+```
+
+</details>
+
+<details>
+<summary><b>OpenClaw configuration</b></summary>
+
+```json
+{
+  "models": {
+    "providers": {
+      "claw-proxy": {
+        "baseUrl": "http://127.0.0.1:3456/v1",
+        "apiKey": "local",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "sonnet",
+            "name": "Claw Proxy · Sonnet"
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+</details>
+
+### Built-in expert agent
+
+`expert-coder` is a discoverable, repository-aware coding profile exposed by
+`GET /v1/agents`. Request it through `/v1/agents/expert-coder/chat/completions`,
+or make it the default for every request:
+
+```bash
+export CLAUDE_PROXY_DEFAULT_AGENT=expert-coder
+npm start
+```
 
 ## Conversations, Queues, and Cancellation
 

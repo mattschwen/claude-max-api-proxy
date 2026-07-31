@@ -14,8 +14,8 @@ export type SameConversationPolicy = "latest-wins" | "queue";
 
 export const GEMINI_OPENAI_BASE_URL =
   "https://generativelanguage.googleapis.com/v1beta/openai";
-export const DEFAULT_GEMINI_FALLBACK_MODEL = "gemini-2.5-flash";
-export const DEFAULT_GEMINI_CLI_MODEL = "gemini-2.5-pro";
+export const DEFAULT_GEMINI_FALLBACK_MODEL = "gemini-3.6-flash";
+export const DEFAULT_GEMINI_CLI_MODEL = "auto";
 export const ZAI_OPENAI_BASE_URL = "https://api.z.ai/api/paas/v4";
 export const ZAI_CODING_OPENAI_BASE_URL =
   "https://api.z.ai/api/coding/paas/v4";

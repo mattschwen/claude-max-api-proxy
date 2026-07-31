@@ -61,7 +61,7 @@ curl http://127.0.0.1:3456/health
       "claude-sonnet-<resolved-by-cli>",
       "local/qwen3"
     ],
-    "configured": ["openrouter/google/gemini-3-pro"],
+    "configured": ["openrouter/google/gemini-3.1-pro-preview"],
     "unavailable": [
       {
         "id": "opus",
@@ -225,7 +225,7 @@ curl http://127.0.0.1:3456/v1/models
       "created": 1710000000
     },
     {
-      "id": "gemini-2.5-flash",
+      "id": "gemini-3.6-flash",
       "object": "model",
       "owned_by": "google",
       "created": 1710000000
@@ -313,11 +313,11 @@ curl http://127.0.0.1:3456/v1/capabilities
     ],
     "available": [
       "claude-sonnet-4-7",
-      "openrouter/google/gemini-3-pro"
+      "openrouter/google/gemini-3.1-pro-preview"
     ],
     "catalog": [
       {
-        "id": "openrouter/google/gemini-3-pro",
+        "id": "openrouter/google/gemini-3.1-pro-preview",
         "provider": "openrouter",
         "transport": "openai-compatible",
         "availability": "configured",
@@ -426,7 +426,7 @@ The proxy accepts:
   and supported full Claude IDs ending in `[1m]`
 - exact versioned IDs returned by `GET /v1/models`
 - older/future versioned IDs for those families, which are mapped to the currently available family model on this machine
-- configured external provider models such as `gemini-2.5-pro`, `gemini-2.5-flash`, `glm-4.7-flash`, `glm-5`, or `glm-4.7`
+- configured external provider models such as `gemini-3.1-pro-preview`, `gemini-3.6-flash`, `glm-4.7-flash`, `glm-5`, or `glm-4.7`
 - optional built-in agent selection via request body `"agent": "expert-coder"` or the scoped `/v1/agents/:agentId/chat/completions` route
 
 ### Minimal non-streaming request
