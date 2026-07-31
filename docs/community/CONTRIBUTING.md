@@ -129,4 +129,4 @@ Participation in this project is governed by [CODE_OF_CONDUCT.md](./CODE_OF_COND
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the [MIT License](../LICENSE).
+By contributing, you agree that your contributions will be licensed under the [MIT License](../../LICENSE).

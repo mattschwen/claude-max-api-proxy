@@ -1,7 +1,7 @@
 {
   "name": "claude-max-api-proxy",
   "version": "1.5.0",
-  "description": "Use your Claude Max subscription with any OpenAI-compatible client. Wraps Claude Code CLI as an OpenAI-compatible API server.",
+  "description": "Local OpenAI-compatible gateway for Claude Code CLI, Gemini CLI, and explicit external providers.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -23,6 +23,8 @@
     "claude-code",
     "claude-max",
     "openai-compatible",
+    "gemini",
+    "multi-provider",
     "api-server",
     "oauth",
     "clawdbot",

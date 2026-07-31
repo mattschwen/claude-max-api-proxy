@@ -10,6 +10,7 @@
 - [`POST /v1/chat/completions`](#post-v1chatcompletions)
 - [`POST /v1/responses`](#post-v1responses)
 - [`DELETE /v1/requests/:requestId`](#delete-v1requestsrequestid)
+- [Optional admin API](#optional-admin-api)
 
 OpenAI-compatible inference endpoints do not require proxy authentication.
 Optional `/admin/*` routes are loopback/token protected. Keep the operational
@@ -701,6 +702,49 @@ Request IDs are unguessable cancellation capabilities. `/health` deliberately
 redacts queued request IDs; the richer Ops snapshot is intended for trusted
 local operators.
 
-When `CLAUDE_PROXY_ENABLE_ADMIN_API=true`, authenticated administrators can also
-force a feature rescan with `POST /admin/features/refresh` and reset a provider
-session with `POST /admin/conversations/:conversationId/reset`.
+## Optional Admin API
+
+Admin routes are mounted only when
+`CLAUDE_PROXY_ENABLE_ADMIN_API=true`. Without
+`CLAUDE_PROXY_ADMIN_TOKEN`, they accept loopback requests only. With a token
+configured, every request—including localhost—must send either
+`Authorization: Bearer <token>` or `X-Admin-Token: <token>`.
+
+### `GET /admin/thinking-budget`
+
+Returns the active server-wide reasoning default and accepted effort labels:
+
+```json
+{
+  "budget": "high",
+  "allowedLabels": ["off", "low", "medium", "high", "xhigh", "max"]
+}
+```
+
+`budget` is `null` when no runtime default is active.
+
+### `POST|PUT /admin/thinking-budget`
+
+Set the default with an effort label or positive integer token count:
+
+```bash
+curl -X PUT http://127.0.0.1:3456/admin/thinking-budget \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $CLAUDE_PROXY_ADMIN_TOKEN" \
+  -d '{"budget":"high"}'
+```
+
+Send `{"budget":null}` to clear the override. Changes are written to
+`RUNTIME_STATE_FILE` and survive restarts.
+
+### `POST /admin/features/refresh`
+
+Immediately re-probes Claude and configured external providers, then returns
+the completed feature-scan snapshot. Probe failure returns
+`503 feature_scan_failed`.
+
+### `POST /admin/conversations/:conversationId/reset`
+
+Discards the resumable provider session for one conversation. Stored transcript
+history remains available, and the next turn starts from a fresh provider
+session.

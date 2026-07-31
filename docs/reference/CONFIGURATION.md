@@ -8,7 +8,7 @@ All runtime configuration is driven by environment variables. Set them **before*
 | --- | --- | --- | --- |
 | `CLAUDE_PROXY_REQUIRE_CLAUDE` | `true` with no external provider; otherwise `false` | `true`, `false` | Require Claude CLI/auth/model checks to pass before startup. Set `true` for a mixed deployment that must never run without Claude. |
 | `CLAUDE_PROXY_SAME_CONVERSATION_POLICY` | `latest-wins` | `latest-wins`, `queue` | How concurrent requests for the same conversation are handled. |
-| `CLAUDE_PROXY_MAX_CONCURRENT_REQUESTS` | host CPU count, capped at `8` | positive integer | Global request concurrency across independent conversations. Per-conversation ordering still applies. |
+| `CLAUDE_PROXY_MAX_CONCURRENT_REQUESTS` | 75% of host parallelism, rounded up and clamped to `2`–`8` | positive integer | Global request concurrency across independent conversations. Per-conversation ordering still applies. |
 | `CLAUDE_PROXY_DEBUG_QUEUES` | `false` | `true`, `false` | Emit extra structured log events for queue enqueue/drop/block/cancel. |
 | `CLAUDE_PROXY_ENABLE_ADMIN_API` | `false` | `true`, `false` | Mount the live thinking-budget, feature-refresh, and conversation-reset admin routes. |
 | `CLAUDE_PROXY_ADMIN_TOKEN` | _(unset)_ | secret string | Require this bearer token (or `X-Admin-Token`) on admin routes. Without it, admin access is restricted to loopback clients. |
@@ -31,19 +31,16 @@ All runtime configuration is driven by environment variables. Set them **before*
 | `OPENAI_COMPAT_FALLBACK_API_KEY` | _(unset)_ | API key | API key sent as `Authorization: Bearer ...` to the external provider. |
 | `OPENAI_COMPAT_FALLBACK_MODEL` | provider-specific inference | model id | Model ID advertised for explicit routing to the external OpenAI-compatible backend. |
 | `OPENAI_COMPAT_FALLBACK_STREAM_MODE` | `synthetic` | `synthetic`, `passthrough` | How streamed external requests are handled. `synthetic` buffers upstream output and emits proxy-generated OpenAI SSE for maximum client compatibility. |
-| `OPENAI_COMPAT_PROVIDERS_JSON` | _(unset)_ | JSON object or array | Declare multiple named OpenAI-compatible providers, models, timeouts, headers, and per-model capabilities. When set, it replaces the legacy single-provider configuration. |
+| `OPENAI_COMPAT_PROVIDERS_JSON` / `OPENAI_COMPAT_PROVIDERS` | _(unset)_ | JSON object or array | Declare multiple named OpenAI-compatible providers, models, timeouts, headers, and per-model capabilities. When set, it replaces the legacy single-provider configuration. Prefer the `_JSON` name for clarity. |
 | `DEFAULT_THINKING_BUDGET` | _(unset)_ | integer, `off`, `none`, `minimal`, `low`, `medium`, `high`, `auto`, `xhigh`, `max`, `ultracode` | Server-wide fallback thinking budget when the client does not send one. |
+| `CLAUDE_PROXY_LOG_FILE` | _(unset)_ | writable filesystem path | Append the same structured JSON events sent to stdout to a durable log file. Parent directories are created automatically. |
 | `DB_PATH` | `~/.claude-proxy-conversations.db` | filesystem path | Location of the SQLite conversation database. |
 | `SESSION_FILE` | `~/.claude-code-cli-sessions.json` | filesystem path | Location of the conversation-to-session mapping file. |
 | `RUNTIME_STATE_FILE` | `dirname(DB_PATH)/runtime-state.json` | filesystem path | Location of persisted admin-endpoint runtime state. |
 | `HOST` | `127.0.0.1` | bind address | Network interface used by the standalone server. |
-| `PORT` (positional arg) | `3456` | any free port | Pass as `node dist/server/standalone.js <port>`. |
+| `PORT` | `3456` | any free port | Docker Compose host-side published port only. For the standalone server, pass the port as `node dist/server/standalone.js <port>`. |
 
 ## Same-conversation policy
-
-> [!NOTE]
-> `xhigh` maps to an intermediate 48000-token tier. If the installed Claude
-> CLI does not support `--effort xhigh`, the proxy falls back to `max`.
 
 The proxy resolves a conversation key in this order:
 
@@ -130,6 +127,22 @@ The house prompt is placed before the request-specific system prompt. The
 proxy checks the file modification time on each request and reloads changed
 content without restarting. An unreadable or empty file is treated as no house
 prompt; unreadable paths produce one structured warning per path.
+
+## Default reasoning effort
+
+Set `DEFAULT_THINKING_BUDGET` when a client cannot send its own reasoning
+controls:
+
+```bash
+export DEFAULT_THINKING_BUDGET=high
+npm start
+```
+
+The value can be a token count or one of the effort labels listed in the
+environment-variable table. Request-body and `X-Thinking-Budget` values take
+precedence over this server default. `xhigh` maps to an intermediate
+48000-token tier; if the installed Claude CLI does not support
+`--effort xhigh`, the proxy falls back to `max`.
 
 ## Model fallback order
 
