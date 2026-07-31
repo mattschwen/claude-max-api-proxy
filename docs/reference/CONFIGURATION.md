@@ -10,6 +10,7 @@ All runtime configuration is driven by environment variables. Set them **before*
 | `CLAUDE_PROXY_DEBUG_QUEUES` | `false` | `true`, `false` | Emit extra structured log events for queue enqueue/drop/block/cancel. |
 | `CLAUDE_PROXY_ENABLE_ADMIN_API` | `false` | `true`, `false` | Mount `GET/POST/PUT /admin/thinking-budget` for live default-thinking changes. |
 | `CLAUDE_PROXY_DEFAULT_AGENT` | _(unset)_ | builtin agent id, currently `expert-coder` | Automatically prepends the built-in expert agent profile to every request unless the caller explicitly chooses another built-in agent route/body value. |
+| `CLAUDE_PROXY_SYSTEM_PROMPT_FILE` | _(unset)_ | readable filesystem path | Prepends a global house prompt to each request. The file is cached by modification time, so edits apply without a restart. |
 | `CLAUDE_PROXY_MODEL_FALLBACKS` | _(unset)_ | comma-separated Claude selectors, e.g. `default,haiku` | When the requested model is unavailable, try these selectors in order before returning `model_unavailable`. |
 | `GEMINI_CLI_ENABLED` | `false` unless `GEMINI_CLI_MODEL` / `GEMINI_CLI_EXTRA_MODELS` is set | `true`, `false` | Enable the local Gemini CLI provider. This is the CLI-first proxy path and does not need an API key. |
 | `GEMINI_CLI_COMMAND` | `gemini` | executable path | Which local Gemini CLI binary the proxy should launch. |
@@ -27,7 +28,7 @@ All runtime configuration is driven by environment variables. Set them **before*
 | `OPENAI_COMPAT_FALLBACK_API_KEY` | _(unset)_ | API key | API key sent as `Authorization: Bearer ...` to the external provider. |
 | `OPENAI_COMPAT_FALLBACK_MODEL` | provider-specific inference | model id | Model ID advertised for explicit routing to the external OpenAI-compatible backend. |
 | `OPENAI_COMPAT_FALLBACK_STREAM_MODE` | `synthetic` | `synthetic`, `passthrough` | How streamed external requests are handled. `synthetic` buffers upstream output and emits proxy-generated OpenAI SSE for maximum client compatibility. |
-| `DEFAULT_THINKING_BUDGET` | _(unset)_ | integer, `off`, `low`, `medium`, `high`, `xhigh`, `max` | Server-wide fallback thinking budget when the client does not send one. |
+| `DEFAULT_THINKING_BUDGET` | _(unset)_ | integer, `off`, `none`, `minimal`, `low`, `medium`, `high`, `auto`, `xhigh`, `max`, `ultracode` | Server-wide fallback thinking budget when the client does not send one. |
 | `DB_PATH` | `~/.claude-proxy-conversations.db` | filesystem path | Location of the SQLite conversation database. |
 | `SESSION_FILE` | `~/.claude-code-cli-sessions.json` | filesystem path | Location of the conversation-to-session mapping file. |
 | `RUNTIME_STATE_FILE` | `dirname(DB_PATH)/runtime-state.json` | filesystem path | Location of persisted admin-endpoint runtime state. |
@@ -97,6 +98,21 @@ instead:
 - `POST /v1/agents/expert-coder/chat/completions`
 - `POST /v1/agents/expert-coder/responses`
 
+## House system prompt
+
+Set `CLAUDE_PROXY_SYSTEM_PROMPT_FILE` to prepend one global instruction block
+to every Claude request:
+
+```bash
+export CLAUDE_PROXY_SYSTEM_PROMPT_FILE=/etc/claude-proxy/house-prompt.md
+npm start
+```
+
+The house prompt is placed before the request-specific system prompt. The
+proxy checks the file modification time on each request and reloads changed
+content without restarting. An unreadable or empty file is treated as no house
+prompt; unreadable paths produce one structured warning per path.
+
 ## Model fallback order
 
 Set `CLAUDE_PROXY_MODEL_FALLBACKS` when you want the proxy to step down to a
@@ -120,7 +136,7 @@ Behavior:
 There are four model-related controls, and they do different jobs:
 
 - Request body `model`
-  What the caller asks to run. Claude aliases (`sonnet`, `opus`, `haiku`) are
+  What the caller asks to run. Claude aliases (`sonnet`, `opus`, `fable`, `haiku`) are
   still the default path.
 - `CLAUDE_PROXY_MODEL_FALLBACKS`
   Claude-only step-down order when the requested Claude family is unavailable.
@@ -137,7 +153,7 @@ That rule is strict:
 
 - omitted `model` stays on Claude
 - `default` stays on Claude
-- `sonnet`, `opus`, `haiku`, and resolved Claude IDs stay on Claude
+- `sonnet`, `opus`, `fable`, `haiku`, and resolved Claude IDs stay on Claude
 - external providers are used only when the caller explicitly asks for one of
   their model IDs
 

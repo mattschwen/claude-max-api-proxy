@@ -110,6 +110,17 @@ test("readRuntimeConfig reads default expert agent", () => {
   assert.ok(config.maxConcurrentRequests >= 1);
 });
 
+test("readRuntimeConfig reads the house system prompt file", () => {
+  const config = readRuntimeConfig(
+    {
+      CLAUDE_PROXY_SYSTEM_PROMPT_FILE: " /etc/claude/house-prompt.md ",
+    },
+    undefined,
+  );
+
+  assert.equal(config.systemPromptFile, "/etc/claude/house-prompt.md");
+});
+
 test("readRuntimeConfig reads max concurrent requests override", () => {
   const config = readRuntimeConfig(
     {

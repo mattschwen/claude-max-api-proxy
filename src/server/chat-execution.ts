@@ -683,13 +683,17 @@ async function runNonStreamingSubprocess(
     | ((cancel: (error: ClaudeProxyError) => void) => void)
     | undefined,
   allowAuthRetry: boolean,
-): Promise<{ authErrored: boolean }> {
+): Promise<{ authErrored: boolean; thinkingBlockReplay: boolean }> {
   const baseTimeout = getModelTimeout(cliInput.model);
   const timeout = hasActiveReasoning(cliInput) ? baseTimeout * 3 : baseTimeout;
 
-  return new Promise<{ authErrored: boolean }>((resolve) => {
+  return new Promise<{
+    authErrored: boolean;
+    thinkingBlockReplay: boolean;
+  }>((resolve) => {
     let authErrored = false;
-    const done = (): void => resolve({ authErrored });
+    let thinkingBlockReplay = false;
+    const done = (): void => resolve({ authErrored, thinkingBlockReplay });
     const subprocess = new ClaudeSubprocess();
     const cleanup = new CleanupSet();
     let finalResult: ClaudeCliResult | null = null;
@@ -795,6 +799,17 @@ async function runNonStreamingSubprocess(
             sessionManager.markFailed(cliInput._conversationId);
           }
 
+          const recoverableThinkingReplay =
+            cliError.code === "thinking_block_replay" &&
+            cliInput.isResume === true &&
+            Boolean(cliInput._conversationId);
+          if (recoverableThinkingReplay && cliInput._conversationId) {
+            sessionManager.delete(cliInput._conversationId);
+            thinkingBlockReplay = true;
+            done();
+            return;
+          }
+
           const authErr = allowAuthRetry && isAuthError(cliError);
           if (authErr) {
             authErrored = true;
@@ -876,7 +891,7 @@ export async function handleNonStreamingResponse(
   requestId: string,
   registerCancel?: (cancel: (error: ClaudeProxyError) => void) => void,
 ): Promise<void> {
-  await withAuthRetry(
+  const result = await withAuthRetry(
     (allowAuthRetry) =>
       runNonStreamingSubprocess(
         res,
@@ -894,5 +909,35 @@ export async function handleNonStreamingResponse(
       modelAvailability.invalidate();
     },
     { requestId, conversationId: cliInput._conversationId },
+  );
+
+  if (
+    !result.thinkingBlockReplay ||
+    res.headersSent ||
+    !cliInput.isResume ||
+    !cliInput._conversationId
+  ) {
+    return;
+  }
+
+  log("request.retry", {
+    requestId,
+    conversationId: cliInput._conversationId,
+    reason: "thinking_block_replay",
+  });
+
+  const retryCli: CliInput = { ...cliInput, isResume: false };
+  const { sessionId } = sessionManager.getOrCreate(
+    cliInput._conversationId,
+    cliInput.model,
+  );
+  retryCli.sessionId = sessionId;
+
+  await runNonStreamingSubprocess(
+    res,
+    retryCli,
+    requestId,
+    registerCancel,
+    false,
   );
 }

@@ -69,9 +69,9 @@ export function parseEffortLabel(raw: unknown): EffortOrOff | undefined {
 export function parseEffortOrTokens(raw: string): number | undefined {
   const trimmed = raw.trim();
   if (!trimmed) return undefined;
-  const lower = trimmed.toLowerCase();
-  if (lower in REASONING_EFFORT_MAP) {
-    return REASONING_EFFORT_MAP[lower as EffortOrOff];
+  const effort = parseEffortLabel(trimmed);
+  if (effort) {
+    return REASONING_EFFORT_MAP[effort];
   }
   const parsed = parseInt(trimmed, 10);
   if (Number.isFinite(parsed) && parsed >= 0) return parsed;

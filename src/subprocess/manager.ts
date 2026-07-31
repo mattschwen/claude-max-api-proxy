@@ -51,8 +51,9 @@ let housePromptCache:
   | null = null;
 let housePromptWarnedPath: string | null = null;
 
-function getHouseSystemPrompt(): string {
-  const filePath = runtimeConfig.systemPromptFile;
+export function getHouseSystemPrompt(
+  filePath = runtimeConfig.systemPromptFile,
+): string {
   if (!filePath) return "";
   try {
     const { mtimeMs } = statSync(filePath);
@@ -77,6 +78,19 @@ function getHouseSystemPrompt(): string {
     }
     return "";
   }
+}
+
+export function buildClaudePrompt(
+  prompt: string,
+  requestSystemPrompt?: string,
+  houseSystemPrompt = getHouseSystemPrompt(),
+): string {
+  const combinedSystem = [houseSystemPrompt, requestSystemPrompt]
+    .filter((part) => part && part.trim())
+    .join("\n\n");
+  return combinedSystem
+    ? `<instructions>\n${combinedSystem}\n</instructions>\n\n${prompt}`
+    : prompt;
 }
 
 export interface ActiveSubprocessSnapshot {
@@ -305,14 +319,7 @@ export class ClaudeSubprocess extends EventEmitter {
     // Merge the optional global house prompt (CLAUDE_PROXY_SYSTEM_PROMPT_FILE)
     // ahead of any per-request client system prompt, then wrap both in the
     // <instructions> block embedded in the user message.
-    const housePrompt = getHouseSystemPrompt();
-    const combinedSystem = [housePrompt, options.systemPrompt]
-      .filter((part) => part && part.trim())
-      .join("\n\n");
-    let finalPrompt = prompt;
-    if (combinedSystem) {
-      finalPrompt = `<instructions>\n${combinedSystem}\n</instructions>\n\n${prompt}`;
-    }
+    const finalPrompt = buildClaudePrompt(prompt, options.systemPrompt);
 
     // Don't add a fallback model when extended thinking is active. A mid-turn
     // fallback (opus -> sonnet) produces a thinking block with a different

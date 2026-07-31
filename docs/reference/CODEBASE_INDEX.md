@@ -34,7 +34,7 @@ The standalone server starts in this order:
 
 1. `verifyClaude()` checks that the `claude` binary exists.
 2. `verifyAuth()` checks `claude auth status`.
-3. `modelAvailability.getSnapshot(true)` probes `sonnet`, `opus`, and `haiku`
+3. `modelAvailability.getSnapshot(true)` probes `sonnet`, `opus`, `fable`, and `haiku`
    and caches the exact versioned model IDs the local CLI resolves.
 4. `startServer()` binds the Express app.
 
@@ -161,7 +161,7 @@ Important rules:
   actual resolved model ids for 10 minutes.
 - `resolveRequestedModel()` accepts either the family alias or an exact
   resolved id returned by `/v1/models`.
-- Default family preference is `sonnet`, then `opus`, then `haiku`.
+- Default family preference is `sonnet`, then `opus`, then `fable`, then `haiku`.
 - External provider models can also appear in `/v1/models`, but they are
   explicit routes only. Omitting `model` still means Claude.
 
@@ -179,7 +179,8 @@ Reasoning input can come from:
 Normalization rules:
 
 - Older or non-adaptive models use fixed token budgets mapped to CLI effort.
-- Adaptive reasoning is enabled only for Sonnet/Opus model lines `4.6+`.
+- Adaptive reasoning is enabled for Sonnet/Opus model lines `4.6+` and Fable
+  model lines `5.0+`.
 - Adaptive reasoning also requires Claude CLI `2.1.111+`.
 - `xhigh` CLI effort requires Claude CLI `2.1.112+`; otherwise large budgets
   fall back to `max`.

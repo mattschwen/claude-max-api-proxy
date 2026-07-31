@@ -210,7 +210,7 @@ export function parseClaudeModelVersion(
   model: string,
 ): ParsedClaudeModelVersion | null {
   const normalized = stripModelProviderPrefix(model).toLowerCase();
-  const match = normalized.match(/(opus|sonnet|haiku)-(\d+)-(\d+)/i);
+  const match = normalized.match(/(opus|sonnet|haiku|fable)-(\d+)-(\d+)/i);
   if (!match) return null;
   return {
     family: match[1] as ModelFamily,
@@ -222,7 +222,11 @@ export function parseClaudeModelVersion(
 export function supportsAdaptiveReasoningModel(model: string): boolean {
   const parsed = parseClaudeModelVersion(model);
   if (!parsed) return false;
-  if (parsed.family !== "opus" && parsed.family !== "sonnet") {
+  if (
+    parsed.family !== "opus" &&
+    parsed.family !== "sonnet" &&
+    parsed.family !== "fable"
+  ) {
     return false;
   }
   if (parsed.major > 4) return true;
