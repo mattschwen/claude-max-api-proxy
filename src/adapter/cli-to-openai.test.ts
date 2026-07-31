@@ -61,16 +61,41 @@ test("cliResultToOpenai reports the served model, not an auxiliary one", () => {
   assert.equal(response.model, "claude-sonnet-5");
 });
 
-test("cliResultToOpenai falls back to the busiest model when the family differs", () => {
-  // --fallback-model can serve a different family than requested; report what
-  // actually ran rather than what was asked for.
+test("cliResultToOpenai uses the assistant event for a cross-family fallback", () => {
+  // The auxiliary model can produce more output than the real turn, so token
+  // counts cannot reliably identify which model served the response.
   const result = makeResult();
   result.modelUsage = {
-    "claude-haiku-4-5-20251001": { inputTokens: 525, outputTokens: 12, costUSD: 0 },
-    "claude-sonnet-4-6": { inputTokens: 40, outputTokens: 900, costUSD: 0 },
+    "claude-haiku-4-5-20251001": {
+      inputTokens: 525,
+      outputTokens: 120,
+      costUSD: 0,
+    },
+    "claude-sonnet-4-6": { inputTokens: 40, outputTokens: 9, costUSD: 0 },
   };
 
-  const response = cliResultToOpenai(result, "req-fallback", "opus");
+  const response = cliResultToOpenai(
+    result,
+    "req-fallback",
+    "opus",
+    "claude-sonnet-4-6",
+  );
 
   assert.equal(response.model, "claude-sonnet-4-6");
+});
+
+test("cliResultToOpenai does not guess from usage when no model evidence exists", () => {
+  const result = makeResult();
+  result.modelUsage = {
+    "claude-haiku-4-5-20251001": {
+      inputTokens: 525,
+      outputTokens: 120,
+      costUSD: 0,
+    },
+    "claude-sonnet-4-6": { inputTokens: 40, outputTokens: 9, costUSD: 0 },
+  };
+
+  const response = cliResultToOpenai(result, "req-unknown", "opus");
+
+  assert.equal(response.model, "opus");
 });
