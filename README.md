@@ -100,7 +100,7 @@ in.
 
 | What you need to know | Meaning in practice |
 | --- | --- |
-| Claude is always the implicit default | Omit `model`, use `default`, or use Claude aliases like `sonnet`, `opus`, and `haiku` to stay on the Claude route. |
+| Claude is always the implicit default | Omit `model`, use `default`, or use Claude aliases like `sonnet`, `opus`, `fable`, and `haiku` to stay on the Claude route. |
 | External models are explicit only | Gemini CLI, GLM, and other OpenAI-compatible providers only activate when the request names that exact external model ID. |
 | Operators get built-in visibility | `/`, `/ops`, `/launch`, `/health`, and `/metrics` are all served by the proxy itself. |
 | Production can stay simple | Host-run Node first. Add LaunchAgent, systemd, or Docker only when you actually need service management. |
@@ -166,7 +166,7 @@ Configured external models such as `gemini-2.5-pro`, `gemini-2.5-flash`,
 | --- | --- |
 | omitted | Claude default path |
 | `default` | Claude account-tier default |
-| `sonnet`, `opus`, `haiku` | Claude family alias |
+| `sonnet`, `opus`, `fable`, `haiku` | Claude family alias |
 | exact Claude ID from `/v1/models` | Claude exact runtime model |
 | configured `gemini-*` or `glm-*` model | Explicit external route |
 
@@ -180,7 +180,7 @@ providers.
 | --- | --- |
 | OpenAI-compatible edge | `POST /v1/chat/completions`, `POST /v1/responses`, `GET /v1/models`, `GET /v1/capabilities`, `GET /v1/agents`, `GET /health`, and `GET /metrics`. |
 | Zero extra credentials | Reuses the machine's existing `claude auth login` session instead of asking clients for a second API key. |
-| Dynamic model routing | Probes stable families like `sonnet`, `opus`, and `haiku`, then surfaces the exact model IDs your local Claude CLI currently resolves. |
+| Dynamic model routing | Probes stable families like `sonnet`, `opus`, `fable`, and `haiku`, then surfaces the exact model IDs your local Claude CLI currently resolves. |
 | Agent discovery | `GET /v1/capabilities` advertises the current runtime surface, CLI feature flags, and which resolved models use adaptive reasoning. |
 | Canonical coding agent | Ship one repo-native `expert-coder` agent so external tools can reuse the same curated coding brain instead of inventing their own prompts. |
 | Session continuity | Reuses the OpenAI `user` field as a conversation key and resumes the underlying CLI session automatically. |
@@ -280,7 +280,7 @@ settings.
 
 There are four separate knobs:
 
-- Request body `model`: chooses the actual model to run. Omit it, use `default`, or use Claude aliases like `sonnet`, `opus`, and `haiku` to stay on the Claude path.
+- Request body `model`: chooses the actual model to run. Omit it, use `default`, or use Claude aliases like `sonnet`, `opus`, `fable`, and `haiku` to stay on the Claude path.
 - `CLAUDE_PROXY_MODEL_FALLBACKS`: chooses the Claude-only step-down order when the requested Claude family is unavailable.
 - `GEMINI_CLI_MODEL` and `GEMINI_CLI_EXTRA_MODELS`: choose the local Gemini CLI models that `/v1/models` advertises through this proxy.
 - `OPENAI_COMPAT_FALLBACK_MODEL` or `ZAI_MODEL`: chooses the external OpenAI-compatible API model that `/v1/models` advertises.
@@ -424,7 +424,7 @@ curl -N http://127.0.0.1:3456/v1/chat/completions \
 | --- | --- |
 | Base URL | `http://127.0.0.1:3456/v1` |
 | API key | any non-empty string if your client requires one |
-| Model | `sonnet`, `opus`, `haiku`, `default`, an exact Claude ID from `/v1/models`, or one explicitly requested external model such as `glm-4.7-flash` or `gemini-2.5-flash` |
+| Model | `sonnet`, `opus`, `fable`, `haiku`, `default`, an exact Claude ID from `/v1/models`, or one explicitly requested external model such as `glm-4.7-flash` or `gemini-2.5-flash` |
 
 The proxy accepts stable family aliases and resolves them to whatever exact
 version the installed Claude CLI currently exposes. `GET /v1/models` returns

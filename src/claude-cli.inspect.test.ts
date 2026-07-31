@@ -126,6 +126,16 @@ test("classifyClaudeError maps passthrough Anthropic auth payloads", () => {
   }
 });
 
+test("classifyClaudeError identifies invalid thinking-block replay", () => {
+  const error = classifyClaudeError(
+    "API Error: 400 thinking blocks in the latest assistant message cannot be modified",
+    "invalid_request",
+  );
+  assert.equal(error.status, 400);
+  assert.equal(error.type, "invalid_request_error");
+  assert.equal(error.code, "thinking_block_replay");
+});
+
 test("parseClaudeVersion extracts semver from Claude CLI output", () => {
   assert.deepEqual(parseClaudeVersion("claude 2.1.112"), {
     major: 2,

@@ -162,7 +162,7 @@ claude_proxy_process_resident_memory_bytes
 OpenAI-compatible. Returns the list of models the current Claude CLI account can
 actually use on this machine, plus any configured external provider models.
 Claude availability is computed by probing the stable Claude CLI family aliases
-(`sonnet`, `opus`, `haiku`) and publishing the exact versioned IDs that the
+(`sonnet`, `opus`, `fable`, `haiku`) and publishing the exact versioned IDs that the
 installed CLI resolves at runtime.
 
 ### Example
@@ -337,7 +337,7 @@ OpenAI-compatible chat completion endpoint. Supports streaming (`stream: true`) 
 
 The proxy accepts:
 
-- stable family aliases: `sonnet`, `opus`, `haiku`
+- stable family aliases: `sonnet`, `opus`, `fable`, `haiku`
 - exact versioned IDs returned by `GET /v1/models`
 - older/future versioned IDs for those families, which are mapped to the currently available family model on this machine
 - configured external provider models such as `gemini-2.5-pro`, `gemini-2.5-flash`, `glm-4.7-flash`, `glm-5`, or `glm-4.7`
@@ -417,15 +417,17 @@ The proxy accepts reasoning controls through any of these inputs:
 - request body `thinking.budget_tokens`
 - request body `thinking.effort`
 - request body `reasoning.mode` / `reasoning.effort` / `reasoning.budget_tokens`
-- request body `reasoning_effort` (`off`, `low`, `medium`, `high`, `xhigh`, `max`)
+- request body `reasoning_effort` (`off`, `low`, `medium`, `high`, `xhigh`, `max`, or a supported alias)
 - request body `output_config.effort`
 - request header `X-Thinking-Budget` (integer tokens or the same effort labels)
 - server default `DEFAULT_THINKING_BUDGET`
 
 `xhigh` maps to an intermediate 48000-token tier when the installed Claude CLI
 supports it. On older Claude CLI builds, the proxy falls back to `max`.
+Client aliases are normalized as follows: `none` → `off`, `minimal` → `low`,
+`auto` → `xhigh`, and `ultracode` → `max`.
 
-For newer Sonnet/Opus model lines that use adaptive reasoning, the proxy
+For newer Sonnet, Opus, and Fable model lines that use adaptive reasoning, the proxy
 normalizes incoming fixed-budget style requests to Claude CLI effort levels and
 publishes those adaptive-capable models in `GET /v1/capabilities`.
 
