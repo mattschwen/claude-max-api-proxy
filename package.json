@@ -46,7 +46,7 @@
   "devDependencies": {
     "@types/express": "^5.0.0",
     "@types/node": "^25.6.0",
-    "typescript": "^6.0.3"
+    "typescript": "^7.0.2"
   },
   "peerDependencies": {
     "clawdbot": ">=2026.1.0"
