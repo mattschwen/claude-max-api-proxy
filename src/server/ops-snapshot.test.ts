@@ -24,14 +24,17 @@ test("buildRuntimeMetricsSnapshot merges live queue and operational state", () =
         "conv-active",
         {
           processing: true,
-          queue: [{ enqueuedAt: 1_000 }],
+          queue: [{ requestId: "req-active-next", enqueuedAt: 1_000 }],
         },
       ],
       [
         "conv-queued",
         {
           processing: false,
-          queue: [{ enqueuedAt: 2_000 }, { enqueuedAt: 2_500 }],
+          queue: [
+            { requestId: "req-queued-1", enqueuedAt: 2_000 },
+            { requestId: "req-queued-2", enqueuedAt: 2_500 },
+          ],
         },
       ],
     ],

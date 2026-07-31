@@ -1,5 +1,6 @@
 export interface QueueItemLike {
   enqueuedAt: number;
+  requestId?: string;
 }
 
 export interface QueueEntryLike {
@@ -11,6 +12,7 @@ export interface QueueStatusEntry {
   queued: number;
   processing: boolean;
   waitMs?: number;
+  queuedRequestIds: string[];
 }
 
 export interface QueueSnapshot {
@@ -18,6 +20,17 @@ export interface QueueSnapshot {
   queuedRequests: number;
   queuedConversations: number;
   oldestQueueWaitMs: number;
+}
+
+const MAX_EXPOSED_REQUEST_IDS_PER_CONVERSATION = 16;
+
+function isSafeOpaqueRequestId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 256 &&
+    !/[\u0000-\u001f\u007f]/.test(value)
+  );
 }
 
 export function buildQueueSnapshot(
@@ -46,6 +59,10 @@ export function buildQueueSnapshot(
       queued: entry.queue.length,
       processing: entry.processing,
       waitMs,
+      queuedRequestIds: entry.queue
+        .slice(0, MAX_EXPOSED_REQUEST_IDS_PER_CONVERSATION)
+        .map((item) => item.requestId)
+        .filter(isSafeOpaqueRequestId),
     };
   }
 

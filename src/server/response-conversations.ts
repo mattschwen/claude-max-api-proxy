@@ -8,6 +8,7 @@ interface ResponseConversationStoreOptions {
   cleanupIntervalMs?: number;
   now?: () => number;
   autoCleanup?: boolean;
+  initialEntries?: Iterable<[string, ResponseConversationEntry]>;
 }
 
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
@@ -22,6 +23,9 @@ export class ResponseConversationStore {
   constructor(options: ResponseConversationStoreOptions = {}) {
     this.ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
     this.now = options.now ?? Date.now;
+    if (options.initialEntries) {
+      this.restore(options.initialEntries);
+    }
 
     if (options.autoCleanup !== false) {
       this.cleanupTimer = setInterval(() => {
@@ -43,7 +47,41 @@ export class ResponseConversationStore {
   get(previousResponseId: string | undefined): string | undefined {
     if (!previousResponseId) return undefined;
     const entry = this.entries.get(previousResponseId);
+    if (entry && entry.createdAt < this.now() - this.ttlMs) {
+      this.entries.delete(previousResponseId);
+      return undefined;
+    }
     return entry?.conversationId;
+  }
+
+  /**
+   * Return a persistence-safe snapshot. Callers can store this in their durable
+   * state layer and provide it back through initialEntries after restart.
+   */
+  snapshot(): Array<[string, ResponseConversationEntry]> {
+    this.cleanup();
+    return Array.from(this.entries, ([responseId, entry]) => [
+      responseId,
+      { ...entry },
+    ]);
+  }
+
+  restore(entries: Iterable<[string, ResponseConversationEntry]>): number {
+    const cutoff = this.now() - this.ttlMs;
+    let restored = 0;
+    for (const [responseId, entry] of entries) {
+      if (
+        !responseId ||
+        !entry?.conversationId ||
+        !Number.isFinite(entry.createdAt) ||
+        entry.createdAt < cutoff
+      ) {
+        continue;
+      }
+      this.entries.set(responseId, { ...entry });
+      restored += 1;
+    }
+    return restored;
   }
 
   cleanup(): number {

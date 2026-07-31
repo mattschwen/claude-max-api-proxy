@@ -40,13 +40,17 @@ The proxy can't be faster than the CLI it wraps.
 
 ## `/v1/models` is empty
 
-This is the single most common failure mode and it looks like a lot of different symptoms (clients report "no models", chat requests return `no_models_available`, `/health` shows an empty `models.available` array).
+This is the single most common failure mode and it looks like a lot of
+different symptoms (clients report "no models", chat requests return
+`no_models_available`, and `/health` shows empty `models.advertised` and
+`models.available` arrays).
 
 It means **one** of these things:
 
 1. Claude CLI is not authenticated.
 2. The authenticated CLI account can't access any of the model IDs the proxy knows about.
 3. The startup model probes all timed out at 60 s.
+4. No explicit external provider models are configured.
 
 ### Check auth
 
@@ -62,7 +66,9 @@ If `loggedIn: false`, fix with `claude auth login`.
 curl -s http://127.0.0.1:3456/health | python3 -m json.tool | less
 ```
 
-Look at `models.unavailable`. Each entry has an `id`, a `code`, and a `message`. Common codes:
+Look at `models.unavailable`. Each entry has an `id`, `provider`, `code`, and
+`message`. External models that are advertised but not yet conclusively probed
+appear in `models.configured`. Common codes:
 
 | Code | Meaning |
 | --- | --- |
@@ -144,7 +150,7 @@ Intentional. When the HTTP client closes the SSE connection, the proxy immediate
 
 Some OpenAI-compatible clients (notably the OpenClaw TUI, which uses a 30 s `streamingWatchdogMs` by default) run their own per-request watchdog that fires if they haven't seen a content chunk in N seconds. When Claude legitimately goes quiet during deep reasoning or tool execution, these client watchdogs trip and surface a misleading "the backend dropped this run silently" message even though the proxy is still happily streaming.
 
-This is a client-side false positive, not a proxy failure. The proxy's activity-based stall detection (Haiku 45 s / Sonnet 90 s / Opus 120 s, above) is the authoritative source of truth: if the run has actually stalled, the proxy kills the subprocess and sends a `finish_reason` that cleanly ends the stream for the client.
+This is a client-side false positive, not a proxy failure. The proxy's activity-based stall detection (Haiku 45 s / Sonnet 90 s / Opus and Fable 120 s, above) is the authoritative source of truth: if the run has actually stalled, the proxy kills the subprocess and sends a `finish_reason` that cleanly ends the stream for the client.
 
 Why the proxy can't paper over this itself:
 
@@ -154,7 +160,7 @@ Why the proxy can't paper over this itself:
 **Fix, in order of preference:**
 
 1. Raise or disable the client's watchdog. For OpenClaw: there is currently no config knob for `streamingWatchdogMs`, so you have to patch `DEFAULT_STREAMING_WATCHDOG_MS` in the installed `dist/tui-*.js` bundle (30 s → 10 min is a reasonable default since the proxy's own stall detection supersedes it).
-2. If the client exposes a config knob, set it to something well above the proxy's hard timeouts (Haiku 2 min / Sonnet 10 min / Opus 30 min).
+2. If the client exposes a config knob, set it to something well above the proxy's hard timeouts (Haiku 2 min / Sonnet 10 min / Opus and Fable 30 min).
 
 ---
 
@@ -162,7 +168,10 @@ Why the proxy can't paper over this itself:
 
 ### "Sending a second message stops the first"
 
-Expected under the default `latest-wins` policy. The proxy treats the OpenAI `user` field as a conversation key. A new request for the same `user` cancels the in-flight one.
+Expected under the default `latest-wins` policy. A new request for the same
+`conversation_id` cancels the in-flight one. The proxy also accepts
+`metadata.conversation_id`, `X-Conversation-Id`, and legacy `user` as identity
+fallbacks.
 
 Switch to strict FIFO if that's what you want:
 
@@ -173,10 +182,11 @@ npm start
 
 ### "Two unrelated threads are stomping each other"
 
-Check whether your client is accidentally reusing the same `user` value across threads. The proxy has no way to know they're unrelated. Either:
+Check whether your client is accidentally reusing the same conversation ID
+across threads. The proxy has no way to know they're unrelated. Either:
 
-- Make the client send unique `user` values per thread, or
-- Omit `user` entirely, and the proxy will assign an internal request ID per request (no continuity, no cross-thread stomping).
+- Make the client send unique `conversation_id` values per thread, or
+- Omit all conversation identity fields, and the proxy will assign an internal request ID per request (no continuity, no cross-thread stomping).
 
 ### "Resume is failing repeatedly for one conversation"
 

@@ -21,6 +21,9 @@ export interface OpenAIResponsesRequest {
   agent?: string;
   input: ResponsesInputItem | ResponsesInputItem[];
   stream?: boolean;
+  conversation_id?: string;
+  conversation_policy?: "interrupt" | "queue";
+  metadata?: Record<string, unknown>;
   user?: string;
   instructions?: string;
   previous_response_id?: string;

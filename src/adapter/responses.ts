@@ -57,9 +57,21 @@ function itemToMessage(item: ResponsesInputItem): OpenAIChatMessage | null {
   return null;
 }
 
+export function responsesInputHasText(
+  input: OpenAIResponsesRequest["input"] | undefined,
+): boolean {
+  if (input === undefined) return false;
+  return normalizeInputs(input).some((item) => {
+    const message = itemToMessage(item);
+    if (!message) return false;
+    return flattenContent(message.content).trim().length > 0;
+  });
+}
+
 export function responsesToChatRequest(
   request: OpenAIResponsesRequest,
   conversationId?: string,
+  previousMessages: OpenAIChatMessage[] = [],
 ): OpenAIChatRequest {
   const messages: OpenAIChatMessage[] = [];
 
@@ -69,6 +81,8 @@ export function responsesToChatRequest(
       content: request.instructions.trim(),
     });
   }
+
+  messages.push(...previousMessages);
 
   for (const item of normalizeInputs(request.input)) {
     const message = itemToMessage(item);
@@ -82,6 +96,9 @@ export function responsesToChatRequest(
     agent: request.agent,
     messages,
     stream: false,
+    conversation_id: conversationId || request.conversation_id,
+    conversation_policy: request.conversation_policy,
+    metadata: request.metadata,
     user: conversationId || request.user,
     thinking: request.thinking,
     reasoning: request.reasoning,

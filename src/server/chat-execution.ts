@@ -15,7 +15,10 @@ import { log, logError } from "../logger.js";
 import { modelAvailability } from "../model-availability.js";
 import { getModelTimeout, getStallTimeout } from "../models.js";
 import { sessionManager } from "../session/manager.js";
-import { conversationStore } from "../store/conversation.js";
+import {
+  conversationStore,
+  type TurnStatus,
+} from "../store/conversation.js";
 import { ClaudeSubprocess } from "../subprocess/manager.js";
 import type {
   ClaudeCliAssistant,
@@ -34,6 +37,15 @@ function hasActiveReasoning(cliInput: CliInput): boolean {
     cliInput.thinkingEffort ||
     cliInput.reasoningMode === "adaptive",
   );
+}
+
+function discardFreshSession(cliInput: CliInput): void {
+  if (cliInput._conversationId && !cliInput.isResume) {
+    sessionManager.discardProvisional(
+      cliInput._conversationId,
+      cliInput.sessionId,
+    );
+  }
 }
 
 /**
@@ -65,6 +77,37 @@ class CleanupSet {
 
 export function getExecutionStats(): { stallDetections: number } {
   return { stallDetections };
+}
+
+function finishStoredTurn(
+  requestId: string,
+  status: Exclude<TurnStatus, "queued" | "running">,
+  options: {
+    output?: string;
+    responseId?: string;
+    sessionId?: string;
+    reason?: string;
+    model?: string;
+    persistMessages?: boolean;
+  } = {},
+): boolean {
+  try {
+    if (!conversationStore.getTurn(requestId)) return false;
+    return conversationStore.finishTurn(requestId, status, {
+      ...options,
+      persistInputMessage: options.persistMessages,
+      persistAssistantMessage: options.persistMessages,
+    });
+  } catch (error) {
+    console.error("[Routes] Turn state error:", error);
+    return false;
+  }
+}
+
+function cancellationTurnStatus(
+  error: ClaudeProxyError,
+): "superseded" | "cancelled" {
+  return error.code === "request_superseded" ? "superseded" : "cancelled";
 }
 
 export function sendJsonError(res: Response, error: ClaudeProxyError): void {
@@ -137,6 +180,36 @@ interface StreamOpts {
   allowAuthRetry?: boolean;
 }
 
+interface CancellationRelay {
+  bind: (cancel: (error: ClaudeProxyError) => void) => void;
+  isCancelled: () => boolean;
+}
+
+/**
+ * Keep cancellation sticky across auth/replay attempts. Without this relay,
+ * the active-request entry can still point at an already-finished attempt
+ * during the gap before the retry installs its own callback.
+ */
+function createCancellationRelay(
+  registerCancel?: (cancel: (error: ClaudeProxyError) => void) => void,
+): CancellationRelay {
+  let cancellation: ClaudeProxyError | undefined;
+  let delegate: ((error: ClaudeProxyError) => void) | undefined;
+  registerCancel?.((error) => {
+    cancellation = error;
+    delegate?.(error);
+  });
+  return {
+    bind(cancel): void {
+      delegate = cancel;
+      if (cancellation) {
+        cancel(cancellation);
+      }
+    },
+    isCancelled: () => Boolean(cancellation),
+  };
+}
+
 /**
  * Single function that wires up all event handlers on a subprocess and
  * returns a promise that resolves when the subprocess completes.
@@ -173,6 +246,7 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
     let isFirst = true;
     let lastModel = cliInput.model;
     let isComplete = false;
+    let isSettled = false;
     let fullResponse = "";
     let clientDisconnected = false;
     let lastAssistantText = "";
@@ -201,7 +275,8 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
       authErrored = false,
       thinkingBlockReplay = false,
     ): void => {
-      if (isComplete) return;
+      if (isSettled) return;
+      isSettled = true;
       isComplete = true;
       cleanup.runAll();
       resolve({
@@ -213,6 +288,22 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
       });
     };
 
+    const finishAfterExit = (
+      success: boolean,
+      cancelled = false,
+      authErrored = false,
+      thinkingBlockReplay = false,
+    ): void => {
+      if (isComplete || isSettled) return;
+      isComplete = true;
+      cleanup.runAll();
+      void subprocess
+        .waitForExit()
+        .finally(() =>
+          finish(success, cancelled, authErrored, thinkingBlockReplay),
+        );
+    };
+
     const keepaliveId = setInterval(() => {
       if (!isComplete && !clientDisconnected && !res.writableEnded) {
         res.write(":keepalive\n\n");
@@ -222,6 +313,8 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
 
     const hardTimeoutId = setTimeout(() => {
       if (!isComplete) {
+        isComplete = true;
+        cleanup.runAll();
         log("request.timeout", {
           requestId,
           conversationId: cliInput._conversationId,
@@ -229,10 +322,14 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
           reason: "hard_timeout",
           timeoutMs: hardTimeout,
         });
-        subprocess.kill();
-        if (cliInput._conversationId) {
+        if (cliInput._conversationId && !cliInput.forkSession) {
           sessionManager.delete(cliInput._conversationId);
         }
+        finishStoredTurn(requestId, "timed_out", {
+          output: fullResponse || undefined,
+          reason: "hard_timeout",
+          model: lastModel,
+        });
         if (!clientDisconnected && !res.writableEnded) {
           res.write(
             `data: ${JSON.stringify({
@@ -246,7 +343,7 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
           res.write("data: [DONE]\n\n");
           res.end();
         }
-        finish(false);
+        void subprocess.stop().finally(() => finish(false));
       }
     }, hardTimeout);
     cleanup.add(() => clearTimeout(hardTimeoutId));
@@ -256,6 +353,8 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
         if (isComplete) return;
         const stalledFor = Date.now() - lastActivityAt;
         if (stalledFor > stallTimeout) {
+          isComplete = true;
+          cleanup.runAll();
           stallDetections++;
           log("subprocess.stall", {
             requestId,
@@ -265,10 +364,6 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
             stallTimeoutMs: stallTimeout,
             model: cliInput.model,
           });
-          subprocess.kill();
-          if (cliInput._conversationId) {
-            sessionManager.markFailed(cliInput._conversationId);
-          }
           if (!clientDisconnected && !res.writableEnded) {
             res.write(
               `data: ${JSON.stringify({
@@ -283,7 +378,12 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
             res.end();
           }
           onStall();
-          finish(false);
+          finishStoredTurn(requestId, "failed", {
+            output: fullResponse || undefined,
+            reason: "stall_detected",
+            model: lastModel,
+          });
+          void subprocess.stop().finally(() => finish(false));
         }
       },
       Math.min(stallTimeout / 2, 10000),
@@ -292,6 +392,8 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
 
     registerCancel?.((error: ClaudeProxyError) => {
       if (isComplete) return;
+      isComplete = true;
+      cleanup.runAll();
       log("subprocess.kill", {
         requestId,
         conversationId: cliInput._conversationId,
@@ -301,43 +403,45 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
       if (!res.writableEnded) {
         respondWithError(res, error, true, requestId);
       }
-      subprocess.kill();
-      finish(false, true);
+      if (cliInput._conversationId && !cliInput.forkSession) {
+        sessionManager.delete(cliInput._conversationId);
+      }
+      finishStoredTurn(requestId, cancellationTurnStatus(error), {
+        output: fullResponse || undefined,
+        reason: error.message,
+        model: lastModel,
+      });
+      void subprocess.stop().finally(() => finish(false, true));
     });
 
     const onClose = (): void => {
       clientDisconnected = true;
       if (isComplete) return;
+      isComplete = true;
+      cleanup.runAll();
       log("subprocess.kill", {
         requestId,
         pid: subprocess.getPid(),
         reason: "client_disconnected",
       });
-      subprocess.kill();
-      // A client disconnect mid-stream leaves the CLI session transcript with a
-      // half-written (partial) thinking block. Resuming that session on the next
-      // turn triggers Anthropic's "thinking blocks ... cannot be modified" 400.
-      // Invalidate the session so the next turn starts fresh.
-      if (cliInput._conversationId) {
+      // Forked attempts leave the committed parent untouched, so cancellation
+      // discards only the child. A non-forked first turn has no safe checkpoint
+      // and must still be invalidated.
+      if (cliInput._conversationId && !cliInput.forkSession) {
         sessionManager.delete(cliInput._conversationId);
       }
-      if (fullResponse && cliInput._conversationId) {
-        try {
-          conversationStore.addMessage(
-            cliInput._conversationId,
-            "assistant",
-            fullResponse + "\n\n[Response truncated — client disconnected]",
-          );
-        } catch (error) {
-          console.error("[Routes] Store error:", error);
-        }
-      }
-      finish(false, true);
+      finishStoredTurn(requestId, "cancelled", {
+        output: fullResponse || undefined,
+        reason: "client_disconnected",
+        model: lastModel,
+      });
+      void subprocess.stop().finally(() => finish(false, true));
     };
     res.on("close", onClose);
     cleanup.add(() => res.removeListener("close", onClose));
 
     subprocess.on("content_delta", (event: ClaudeCliStreamEvent) => {
+      if (isComplete) return;
       lastActivityAt = Date.now();
       const text = event.event?.delta?.text || "";
       fullResponse += text;
@@ -361,6 +465,7 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
     });
 
     subprocess.on("assistant", (message: ClaudeCliAssistant) => {
+      if (isComplete) return;
       lastActivityAt = Date.now();
       lastModel = message.message.model;
       lastAssistantText = extractTextContent(message);
@@ -368,6 +473,7 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
     });
 
     subprocess.on("result", (result: ClaudeCliResult) => {
+      if (isComplete) return;
       lastActivityAt = Date.now();
 
       const cliError = extractClaudeErrorFromResult(
@@ -420,15 +526,23 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
             reason: "thinking_block_replay_recover",
           });
           sessionManager.delete(cliInput._conversationId);
-          finish(false, false, false, true);
+          finishAfterExit(false, false, false, true);
           return;
         }
 
         const authErr = allowAuthRetry && isAuthError(cliError);
+        discardFreshSession(cliInput);
+        if (!authErr) {
+          finishStoredTurn(requestId, "failed", {
+            output: fullResponse || undefined,
+            reason: cliError.code || cliError.message,
+            model: lastModel,
+          });
+        }
+        finishAfterExit(false, false, authErr);
         if (!authErr && !clientDisconnected && !res.writableEnded) {
           writeStreamingError(res, cliError);
         }
-        finish(false, false, authErr);
         return;
       }
 
@@ -472,13 +586,6 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
       }
 
       try {
-        if (fullResponse && cliInput._conversationId) {
-          conversationStore.addMessage(
-            cliInput._conversationId,
-            "assistant",
-            fullResponse,
-          );
-        }
         conversationStore.recordMetric("request_complete", {
           conversationId: cliInput._conversationId,
           durationMs: Date.now() - (cliInput._startTime || Date.now()),
@@ -492,6 +599,21 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
       if (cliInput._conversationId && cliInput.isResume) {
         sessionManager.markSuccess(cliInput._conversationId);
       }
+
+      finishStoredTurn(requestId, "completed", {
+        output: fullResponse,
+        sessionId: result.session_id,
+        model: lastModel,
+        persistMessages: true,
+      });
+      if (cliInput._conversationId && result.session_id) {
+        sessionManager.commitSession(
+          cliInput._conversationId,
+          result.session_id,
+          lastModel,
+        );
+      }
+      finishAfterExit(true);
 
       if (!clientDisconnected && !res.writableEnded) {
         const doneChunk = createDoneChunk(requestId, lastModel);
@@ -512,10 +634,10 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
         clientDisconnected,
       });
 
-      finish(true);
     });
 
     subprocess.on("error", (error: Error) => {
+      if (isComplete) return;
       logError("request.error", error, {
         requestId,
         conversationId: cliInput._conversationId,
@@ -532,6 +654,13 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
         console.error("[Routes] Metric error:", metricError);
       }
 
+      discardFreshSession(cliInput);
+      finishStoredTurn(requestId, "failed", {
+        output: fullResponse || undefined,
+        reason: error.message,
+        model: lastModel,
+      });
+      finishAfterExit(false);
       if (!clientDisconnected && !res.writableEnded) {
         res.write(
           `data: ${JSON.stringify({
@@ -541,27 +670,32 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
         res.write("data: [DONE]\n\n");
         res.end();
       }
-      finish(false);
     });
 
     subprocess.on("close", (code: number | null) => {
       if (!isComplete) {
+        isComplete = true;
+        cleanup.runAll();
+        discardFreshSession(cliInput);
         if (!clientDisconnected && !res.writableEnded) {
-          if (code !== 0) {
-            res.write(
-              `data: ${JSON.stringify({
-                error: {
-                  message: `Process exited with code ${code}`,
-                  type: "server_error",
-                  code: null,
-                },
-              })}\n\n`,
-            );
-          }
+          res.write(
+            `data: ${JSON.stringify({
+              error: {
+                message: `Claude CLI exited with code ${code} without a result`,
+                type: "server_error",
+                code: "missing_cli_result",
+              },
+            })}\n\n`,
+          );
           res.write("data: [DONE]\n\n");
           res.end();
         }
-        finish(code === 0);
+        finishStoredTurn(requestId, "failed", {
+          output: fullResponse || undefined,
+          reason: `process_exit_${code}_without_result`,
+          model: lastModel,
+        });
+        finish(false);
       }
     });
 
@@ -572,15 +706,24 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
           sessionId: cliInput.sessionId,
           systemPrompt: cliInput.systemPrompt,
           isResume: cliInput.isResume,
+          forkSession: cliInput.forkSession,
           thinkingBudget: cliInput.thinkingBudget,
           thinkingEffort: cliInput.thinkingEffort,
           reasoningMode: cliInput.reasoningMode,
         })
         .catch((error: Error) => {
+          if (isComplete) return;
           logError("request.error", error, {
             requestId,
             reason: "subprocess_start_failed",
           });
+          discardFreshSession(cliInput);
+          finishStoredTurn(requestId, "failed", {
+            output: fullResponse || undefined,
+            reason: error.message,
+            model: lastModel,
+          });
+          finishAfterExit(false);
           if (!clientDisconnected && !res.writableEnded) {
             res.write(
               `data: ${JSON.stringify({
@@ -594,7 +737,6 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
             res.write("data: [DONE]\n\n");
             res.end();
           }
-          finish(false);
         });
     }
   });
@@ -607,6 +749,7 @@ export async function handleStreamingResponse(
   registerCancel?: (cancel: (error: ClaudeProxyError) => void) => void,
 ): Promise<void> {
   startStreamingResponse(res, requestId);
+  const cancellation = createCancellationRelay(registerCancel);
 
   const result = await withAuthRetry(
     (allowAuthRetry) =>
@@ -614,7 +757,7 @@ export async function handleStreamingResponse(
         cliInput,
         requestId,
         res,
-        registerCancel,
+        registerCancel: cancellation.bind,
         allowAuthRetry,
         onStall: () => {
           if (cliInput._conversationId) {
@@ -635,7 +778,7 @@ export async function handleStreamingResponse(
 
   if (result.success || result.cancelled) return;
 
-  if (!res.writableEnded) {
+  if (!res.writableEnded && !cancellation.isCancelled()) {
     log("request.retry", {
       requestId,
       conversationId: cliInput._conversationId,
@@ -646,6 +789,9 @@ export async function handleStreamingResponse(
     if (retryCli.isResume && cliInput._conversationId) {
       sessionManager.markFailed(cliInput._conversationId);
       retryCli.isResume = false;
+      retryCli.forkSession = false;
+      retryCli.prompt = cliInput._freshPrompt ?? retryCli.prompt;
+      retryCli.systemPrompt = cliInput._freshSystemPrompt;
       const { sessionId } = sessionManager.getOrCreate(
         cliInput._conversationId,
         cliInput.model,
@@ -654,12 +800,13 @@ export async function handleStreamingResponse(
     }
 
     await new Promise((resolve) => setTimeout(resolve, 1000));
+    if (cancellation.isCancelled() || res.writableEnded) return;
 
     await runStreamingSubprocess({
       cliInput: retryCli,
       requestId,
       res,
-      registerCancel,
+      registerCancel: cancellation.bind,
       onStall: () => {
         if (cliInput._conversationId) {
           sessionManager.markFailed(cliInput._conversationId);
@@ -683,17 +830,28 @@ async function runNonStreamingSubprocess(
     | ((cancel: (error: ClaudeProxyError) => void) => void)
     | undefined,
   allowAuthRetry: boolean,
-): Promise<{ authErrored: boolean; thinkingBlockReplay: boolean }> {
+): Promise<{
+  authErrored: boolean;
+  thinkingBlockReplay: boolean;
+  cancelled: boolean;
+}> {
   const baseTimeout = getModelTimeout(cliInput.model);
   const timeout = hasActiveReasoning(cliInput) ? baseTimeout * 3 : baseTimeout;
 
   return new Promise<{
     authErrored: boolean;
     thinkingBlockReplay: boolean;
+    cancelled: boolean;
   }>((resolve) => {
     let authErrored = false;
     let thinkingBlockReplay = false;
-    const done = (): void => resolve({ authErrored, thinkingBlockReplay });
+    let cancelled = false;
+    let isSettled = false;
+    const done = (): void => {
+      if (isSettled) return;
+      isSettled = true;
+      resolve({ authErrored, thinkingBlockReplay, cancelled });
+    };
     const subprocess = new ClaudeSubprocess();
     const cleanup = new CleanupSet();
     let finalResult: ClaudeCliResult | null = null;
@@ -704,27 +862,65 @@ async function runNonStreamingSubprocess(
 
     registerCancel?.((error: ClaudeProxyError) => {
       if (isComplete) return;
+      isComplete = true;
+      cancelled = true;
+      cleanup.runAll();
       log("subprocess.kill", {
         requestId,
         conversationId: cliInput._conversationId,
         pid: subprocess.getPid(),
         reason: error.code || "cancelled",
       });
-      subprocess.kill();
-      isComplete = true;
-      cleanup.runAll();
+      if (cliInput._conversationId && !cliInput.forkSession) {
+        sessionManager.delete(cliInput._conversationId);
+      }
       respondWithError(res, error, false, requestId);
-      done();
+      finishStoredTurn(requestId, cancellationTurnStatus(error), {
+        reason: error.message,
+        model: lastAssistantModel || cliInput.model,
+      });
+      void subprocess.stop().finally(done);
     });
+
+    const onClientClose = (): void => {
+      if (isComplete) return;
+      isComplete = true;
+      cancelled = true;
+      cleanup.runAll();
+      log("subprocess.kill", {
+        requestId,
+        conversationId: cliInput._conversationId,
+        pid: subprocess.getPid(),
+        reason: "client_disconnected",
+      });
+      if (cliInput._conversationId && !cliInput.forkSession) {
+        sessionManager.delete(cliInput._conversationId);
+      }
+      finishStoredTurn(requestId, "cancelled", {
+        reason: "client_disconnected",
+        model: lastAssistantModel || cliInput.model,
+      });
+      void subprocess.stop().finally(done);
+    };
+    res.on("close", onClientClose);
+    cleanup.add(() => res.removeListener("close", onClientClose));
 
     const timeoutId = setTimeout(() => {
       if (!isComplete) {
+        isComplete = true;
+        cleanup.runAll();
         log("request.timeout", {
           requestId,
           conversationId: cliInput._conversationId,
           timeoutMs: timeout,
         });
-        subprocess.kill();
+        if (cliInput._conversationId && !cliInput.forkSession) {
+          sessionManager.delete(cliInput._conversationId);
+        }
+        finishStoredTurn(requestId, "timed_out", {
+          reason: "hard_timeout",
+          model: lastAssistantModel || cliInput.model,
+        });
         if (!res.headersSent) {
           res.status(504).json({
             error: {
@@ -734,24 +930,25 @@ async function runNonStreamingSubprocess(
             },
           });
         }
-        isComplete = true;
-        cleanup.runAll();
-        done();
+        void subprocess.stop().finally(done);
       }
     }, timeout);
     cleanup.add(() => clearTimeout(timeoutId));
 
     subprocess.on("result", (result: ClaudeCliResult) => {
+      if (isComplete) return;
       finalResult = result;
     });
 
     subprocess.on("assistant", (message: ClaudeCliAssistant) => {
+      if (isComplete) return;
       lastAssistantModel = message.message.model;
       lastAssistantText = extractTextContent(message);
       lastAssistantError = message.error;
     });
 
     subprocess.on("error", (error: Error) => {
+      if (isComplete) return;
       isComplete = true;
       cleanup.runAll();
       logError("request.error", error, { requestId });
@@ -760,10 +957,16 @@ async function runNonStreamingSubprocess(
           error: { message: error.message, type: "server_error", code: null },
         });
       }
-      done();
+      discardFreshSession(cliInput);
+      finishStoredTurn(requestId, "failed", {
+        reason: error.message,
+        model: lastAssistantModel || cliInput.model,
+      });
+      void subprocess.stop().finally(done);
     });
 
     subprocess.on("close", (code: number | null) => {
+      if (isComplete) return;
       isComplete = true;
       cleanup.runAll();
       if (finalResult) {
@@ -800,6 +1003,7 @@ async function runNonStreamingSubprocess(
           if (cliInput._conversationId && cliInput.isResume) {
             sessionManager.markFailed(cliInput._conversationId);
           }
+          discardFreshSession(cliInput);
 
           const recoverableThinkingReplay =
             cliError.code === "thinking_block_replay" &&
@@ -818,18 +1022,19 @@ async function runNonStreamingSubprocess(
           } else if (!res.headersSent) {
             sendJsonError(res, cliError);
           }
+          if (!authErr) {
+            finishStoredTurn(requestId, "failed", {
+              output: finalResult.result || undefined,
+              sessionId: finalResult.session_id,
+              reason: cliError.code || cliError.message,
+              model: lastAssistantModel || cliInput.model,
+            });
+          }
           done();
           return;
         }
 
         try {
-          if (finalResult.result && cliInput._conversationId) {
-            conversationStore.addMessage(
-              cliInput._conversationId,
-              "assistant",
-              finalResult.result,
-            );
-          }
           conversationStore.recordMetric("request_complete", {
             conversationId: cliInput._conversationId,
             durationMs: Date.now() - (cliInput._startTime || Date.now()),
@@ -841,6 +1046,19 @@ async function runNonStreamingSubprocess(
 
         if (cliInput._conversationId && cliInput.isResume) {
           sessionManager.markSuccess(cliInput._conversationId);
+        }
+        finishStoredTurn(requestId, "completed", {
+          output: finalResult.result,
+          sessionId: finalResult.session_id,
+          model: lastAssistantModel || cliInput.model,
+          persistMessages: true,
+        });
+        if (cliInput._conversationId && finalResult.session_id) {
+          sessionManager.commitSession(
+            cliInput._conversationId,
+            finalResult.session_id,
+            lastAssistantModel || cliInput.model,
+          );
         }
 
         if (!res.headersSent) {
@@ -862,6 +1080,13 @@ async function runNonStreamingSubprocess(
           },
         });
       }
+      if (!finalResult) {
+        discardFreshSession(cliInput);
+        finishStoredTurn(requestId, "failed", {
+          reason: `process_exit_${code}_without_response`,
+          model: lastAssistantModel || cliInput.model,
+        });
+      }
       done();
     });
 
@@ -872,11 +1097,13 @@ async function runNonStreamingSubprocess(
           sessionId: cliInput.sessionId,
           systemPrompt: cliInput.systemPrompt,
           isResume: cliInput.isResume,
+          forkSession: cliInput.forkSession,
           thinkingBudget: cliInput.thinkingBudget,
           thinkingEffort: cliInput.thinkingEffort,
           reasoningMode: cliInput.reasoningMode,
         })
         .catch((error: Error) => {
+          if (isComplete) return;
           isComplete = true;
           cleanup.runAll();
           if (!res.headersSent) {
@@ -888,6 +1115,11 @@ async function runNonStreamingSubprocess(
               },
             });
           }
+          discardFreshSession(cliInput);
+          finishStoredTurn(requestId, "failed", {
+            reason: error.message,
+            model: lastAssistantModel || cliInput.model,
+          });
           done();
         });
     }
@@ -900,13 +1132,14 @@ export async function handleNonStreamingResponse(
   requestId: string,
   registerCancel?: (cancel: (error: ClaudeProxyError) => void) => void,
 ): Promise<void> {
+  const cancellation = createCancellationRelay(registerCancel);
   const result = await withAuthRetry(
     (allowAuthRetry) =>
       runNonStreamingSubprocess(
         res,
         cliInput,
         requestId,
-        registerCancel,
+        cancellation.bind,
         allowAuthRetry,
       ),
     () => {
@@ -921,6 +1154,8 @@ export async function handleNonStreamingResponse(
   );
 
   if (
+    result.cancelled ||
+    cancellation.isCancelled() ||
     !result.thinkingBlockReplay ||
     res.headersSent ||
     !cliInput.isResume ||
@@ -935,7 +1170,13 @@ export async function handleNonStreamingResponse(
     reason: "thinking_block_replay",
   });
 
-  const retryCli: CliInput = { ...cliInput, isResume: false };
+  const retryCli: CliInput = {
+    ...cliInput,
+    isResume: false,
+    forkSession: false,
+    prompt: cliInput._freshPrompt ?? cliInput.prompt,
+    systemPrompt: cliInput._freshSystemPrompt,
+  };
   const { sessionId } = sessionManager.getOrCreate(
     cliInput._conversationId,
     cliInput.model,
@@ -946,7 +1187,7 @@ export async function handleNonStreamingResponse(
     res,
     retryCli,
     requestId,
-    registerCancel,
+    cancellation.bind,
     false,
   );
 }

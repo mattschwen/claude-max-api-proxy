@@ -13,6 +13,16 @@ export interface OpenAIChatRequest {
   messages: OpenAIChatMessage[];
   agent?: string;
   stream?: boolean;
+  /**
+   * Proxy-specific stable thread identifier. Prefer this over `user`, whose
+   * OpenAI meaning is an end-user identifier rather than a conversation.
+   */
+  conversation_id?: string;
+  /**
+   * Proxy-specific override for same-conversation admission behavior.
+   */
+  conversation_policy?: "interrupt" | "queue";
+  metadata?: Record<string, unknown>;
   temperature?: number;
   max_tokens?: number;
   top_p?: number;

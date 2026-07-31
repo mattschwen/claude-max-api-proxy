@@ -72,6 +72,7 @@ export interface OpsSessionSummary {
 export interface OpsQueueConversation {
   conversationId: string;
   queued: number;
+  queuedRequestIds: string[];
   processing: boolean;
   waitMs: number | null;
   active: boolean;
@@ -266,6 +267,7 @@ export async function collectOpsDashboardSnapshot(
       return {
         conversationId,
         queued: entry.queued,
+        queuedRequestIds: entry.queuedRequestIds,
         processing: entry.processing,
         waitMs: entry.waitMs ?? null,
         active: Boolean(active),
@@ -391,6 +393,7 @@ export function collectOpsConversationSnapshot(
       ? {
           conversationId,
           queued: queueState.queued,
+          queuedRequestIds: queueState.queuedRequestIds,
           processing: queueState.processing,
           waitMs: queueState.waitMs ?? null,
           active: Boolean(activeRequest),

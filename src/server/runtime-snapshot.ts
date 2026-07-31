@@ -1,4 +1,4 @@
-import { hasConfiguredExternalProvider } from "../external-providers.js";
+import { runtimeConfig } from "../config.js";
 import { supportsAdaptiveReasoningModel } from "../models.js";
 import { modelAvailability } from "../model-availability.js";
 import { conversationStore } from "../store/conversation.js";
@@ -20,6 +20,13 @@ export interface OperationalSnapshot {
   failureStats: ReturnType<typeof sessionManager.getFailureStats>;
   consecutiveAuthFailures: number;
   authUnhealthy: boolean;
+}
+
+export function isRequiredClaudeAuthUnhealthy(
+  consecutiveAuthFailures: number,
+  requireClaude = runtimeConfig.requireClaude,
+): boolean {
+  return consecutiveAuthFailures >= 3 && requireClaude;
 }
 
 export async function collectOperationalSnapshot(): Promise<OperationalSnapshot> {
@@ -54,8 +61,9 @@ export async function collectOperationalSnapshot(): Promise<OperationalSnapshot>
   }
 
   const consecutiveAuthFailures = modelAvailability.getConsecutiveAuthFailures();
-  const authUnhealthy = consecutiveAuthFailures >= 3 &&
-    !hasConfiguredExternalProvider();
+  const authUnhealthy = isRequiredClaudeAuthUnhealthy(
+    consecutiveAuthFailures,
+  );
 
   return {
     healthMetrics,

@@ -10,8 +10,11 @@ import {
 import type { ClaudeCliInit } from "./types/claude-cli.js";
 import {
   createModelDefinition,
+  createModelDefinitionFromProbe,
+  getDefaultModelFamilyOrder,
   getModelDefinitions,
   getModelList,
+  isExtendedContextModel,
   resolveModelFamily,
   stripModelProviderPrefix,
   type ModelDefinition,
@@ -27,7 +30,7 @@ const PROBE_TTL_MS = 10 * 60 * 1000;
 // force a refresh attempt at most once every AUTH_RETRY_COOLDOWN_MS when an
 // auth failure has been observed.
 const AUTH_RETRY_COOLDOWN_MS = 60 * 1000;
-const DEFAULT_FAMILY_ORDER: ModelFamily[] = ["sonnet", "opus", "haiku"];
+const DEFAULT_FAMILY_ORDER: ModelFamily[] = getDefaultModelFamilyOrder();
 
 // Self-exit threshold: once this many consecutive verifyAuth failures have
 // occurred, the proxy can no longer recover without outside help (credential
@@ -62,6 +65,11 @@ export interface ModelAvailabilitySnapshot {
 function pickDefaultModel(
   available: ModelDefinition[],
 ): ModelDefinition | null {
+  const accountDefault = available.find(
+    (definition) => definition.alias === "default",
+  );
+  if (accountDefault) return accountDefault;
+
   for (const family of DEFAULT_FAMILY_ORDER) {
     const match = available.find((definition) => definition.family === family);
     if (match) return match;
@@ -89,13 +97,7 @@ function createResolvedDefinition(
   alias: string,
   resolvedModel?: string,
 ): ModelDefinition | null {
-  const family = resolveModelFamily(resolvedModel || alias);
-  if (!family) return null;
-  const definition = createModelDefinition(family, resolvedModel || alias);
-  return {
-    ...definition,
-    alias,
-  };
+  return createModelDefinitionFromProbe(alias, resolvedModel);
 }
 
 function dedupeAvailableDefinitions(
@@ -109,13 +111,14 @@ function dedupeAvailableDefinitions(
   });
 }
 
-interface ModelAvailabilityDeps {
+export interface ModelAvailabilityDeps {
   verifyClaude: typeof verifyClaude;
   verifyAuth: typeof verifyAuth;
   probeModelAvailability: typeof probeModelAvailability;
   getModelDefinitions: typeof getModelDefinitions;
   getFallbackAliases: () => string[];
   exitProcess: (code: number) => void;
+  shouldSelfExitOnAuthFailure?: () => boolean;
 }
 
 const defaultDeps: ModelAvailabilityDeps = {
@@ -124,6 +127,7 @@ const defaultDeps: ModelAvailabilityDeps = {
   probeModelAvailability,
   getModelDefinitions,
   getFallbackAliases: () => runtimeConfig.modelFallbacks,
+  shouldSelfExitOnAuthFailure: () => runtimeConfig.requireClaude,
   exitProcess: (code) => {
     process.exit(code);
   },
@@ -276,6 +280,21 @@ export class ModelAvailabilityManager {
       return this.resolveFallbackModel(snapshot.available);
     }
 
+    // Claude Code accepts the account-gated `[1m]` selector on Sonnet and
+    // Opus aliases/full IDs. The base family probe establishes that the model
+    // is otherwise usable; preserve the caller's selector so the CLI, rather
+    // than the proxy, performs the account/context entitlement check.
+    if (isExtendedContextModel(normalized)) {
+      if (family !== "sonnet" && family !== "opus") {
+        return null;
+      }
+      if (
+        snapshot.available.some((definition) => definition.family === family)
+      ) {
+        return createModelDefinition(family, normalized, normalized);
+      }
+    }
+
     return (
       snapshot.available.find((definition) => definition.family === family) ??
       this.resolveFallbackModel(snapshot.available)
@@ -310,7 +329,10 @@ export class ModelAvailabilityManager {
 
     if (!authResult.ok) {
       this.consecutiveAuthFailures += 1;
-      if (this.consecutiveAuthFailures >= AUTH_SELF_EXIT_THRESHOLD) {
+      if (
+        this.consecutiveAuthFailures >= AUTH_SELF_EXIT_THRESHOLD &&
+        (this.deps.shouldSelfExitOnAuthFailure?.() ?? true)
+      ) {
         log("auth.failure", {
           phase: "self_exit",
           consecutiveAuthFailures: this.consecutiveAuthFailures,
@@ -362,10 +384,15 @@ export class ModelAvailabilityManager {
     let cliInit: ClaudeCliInit | undefined;
 
     for (const probe of primaryProbes) {
-      const resolvedDefinition = createModelDefinition(
-        probe.definition.family,
-        probe.result.resolvedModel || probe.definition.alias,
-      );
+      const resolvedDefinition =
+        createModelDefinitionFromProbe(
+          probe.definition.alias,
+          probe.result.resolvedModel,
+        ) ??
+        createModelDefinition(
+          probe.definition.family,
+          probe.result.resolvedModel || probe.definition.alias,
+        );
       cliInit ||= probe.result.init;
 
       if (probe.result.ok) {

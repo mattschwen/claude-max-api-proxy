@@ -231,12 +231,40 @@ function renderLauncherPage(snapshotJson: string, linksJson: string): string {
               <span class="eyebrow">Chat Lab</span>
               <h2>API to Proxy to CLI</h2>
             </div>
-            <span class="status-pill" id="labStatusPill">Ready</span>
+            <span
+              class="status-pill"
+              id="labStatusPill"
+              role="status"
+              aria-live="polite"
+            >Ready</span>
           </div>
           <p class="section-copy">
             This sends a real OpenAI-compatible request through the proxy. Reuse
             a conversation id to exercise queueing and session behavior.
           </p>
+
+          <div class="lab-thread-toolbar">
+            <div>
+              <span class="eyebrow">Threads</span>
+              <strong id="labThreadSummary">1 local thread</strong>
+            </div>
+            <div class="thread-actions">
+              <button class="button button--compact" id="labNewThreadButton" type="button">
+                <span>New Thread</span>
+                <span>＋</span>
+              </button>
+              <button class="button button--compact" id="labBranchThreadButton" type="button">
+                <span>Branch</span>
+                <span>Fork</span>
+              </button>
+            </div>
+          </div>
+          <div
+            class="lab-thread-list"
+            id="labThreadList"
+            role="tablist"
+            aria-label="Open Chat Lab threads"
+          ></div>
 
           <div class="lab-controls">
             <label class="field">
@@ -263,7 +291,21 @@ function renderLauncherPage(snapshotJson: string, linksJson: string): string {
                 autocomplete="off"
               />
             </label>
+
+            <label class="field">
+              <span>Same-thread behavior</span>
+              <select id="labPolicySelect">
+                <option value="interrupt">Interrupt active response</option>
+                <option value="queue">Queue in order</option>
+              </select>
+            </label>
           </div>
+          <div
+            class="model-help"
+            id="labModelHelp"
+            role="status"
+            aria-live="polite"
+          >Loading model catalog…</div>
 
           <label class="field field--stacked">
             <span>System prompt</span>
@@ -282,7 +324,12 @@ function renderLauncherPage(snapshotJson: string, linksJson: string): string {
                 <span class="meta-badge" id="labModelBadge">model pending</span>
               </div>
             </div>
-            <div class="transcript-list" id="labTranscript">
+            <div
+              class="transcript-list"
+              id="labTranscript"
+              role="log"
+              aria-label="Chat Lab transcript"
+            >
               <div class="empty-state">No messages yet. Send a prompt to test the proxy.</div>
             </div>
           </div>
@@ -293,8 +340,13 @@ function renderLauncherPage(snapshotJson: string, linksJson: string): string {
               id="labPromptInput"
               rows="5"
               placeholder="Describe a request to send through the proxy"
+              aria-describedby="labComposerHint"
             ></textarea>
           </label>
+          <p class="composer-hint" id="labComposerHint">
+            New prompts interrupt the active response in this thread.
+            Different threads run independently.
+          </p>
 
           <div class="composer-row">
             <label class="toggle">
@@ -306,16 +358,32 @@ function renderLauncherPage(snapshotJson: string, linksJson: string): string {
                 <span>Send Through Proxy</span>
                 <span>POST</span>
               </button>
-              <button class="button" id="labStopButton" type="button">
+              <button
+                class="button"
+                id="labStopButton"
+                type="button"
+                aria-label="Stop requests in the current thread"
+              >
                 <span>Stop</span>
                 <span>Abort</span>
               </button>
-              <button class="button" id="labResetButton" type="button">
+              <button
+                class="button"
+                id="labResetButton"
+                type="button"
+                aria-label="Reset the current thread with a new conversation id"
+              >
                 <span>Reset</span>
                 <span>New Chat</span>
               </button>
             </div>
           </div>
+          <span
+            class="sr-only"
+            id="labAnnouncement"
+            role="status"
+            aria-live="polite"
+          ></span>
         </article>
 
         <div class="lab-side">
@@ -372,7 +440,12 @@ function renderLauncherPage(snapshotJson: string, linksJson: string): string {
             </div>
             <span class="meta-badge" id="runtimeRefreshStamp">syncing</span>
           </div>
-          <div class="stack-list" id="conversationList"></div>
+          <div
+            class="stack-list"
+            id="conversationList"
+            role="list"
+            aria-label="Recent stored conversations"
+          ></div>
         </article>
 
         <article class="panel live-card" data-tone="lime">

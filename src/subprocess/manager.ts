@@ -39,6 +39,7 @@ import {
 } from "../reasoning.js";
 
 const KILL_ESCALATION_MS = 5000;
+const KILL_FORCE_RELEASE_MS = 1000;
 
 // Optional global ("house") system prompt sourced from a file
 // (CLAUDE_PROXY_SYSTEM_PROMPT_FILE). It is injected into the proxy's
@@ -111,6 +112,8 @@ export interface SubprocessOptions {
   sessionId?: string;
   systemPrompt?: string;
   isResume?: boolean;
+  /** Resume from the parent checkpoint without mutating it. */
+  forkSession?: boolean;
   cwd?: string;
   thinkingBudget?: number;
   thinkingEffort?: ReasoningEffort;
@@ -182,6 +185,8 @@ export class ClaudeSubprocess extends EventEmitter {
   private buffer = "";
   private killed = false;
   private escalationTimer: ReturnType<typeof setTimeout> | null = null;
+  private stopPromise: Promise<void> | null = null;
+  private closed = false;
   private startedAt = 0;
   private model: ClaudeModel | null = null;
   private reasoningMode = "off";
@@ -201,14 +206,22 @@ export class ClaudeSubprocess extends EventEmitter {
   async start(prompt: string, options: SubprocessOptions): Promise<void> {
     const { args, prompt: finalPrompt } = this.buildArgs(prompt, options);
     await prepareClaudeSpawn();
+    if (this.killed) {
+      throw new Error("Claude subprocess was cancelled before spawn");
+    }
 
     return new Promise<void>((startResolve, startReject) => {
       try {
+        if (this.killed) {
+          startReject(new Error("Claude subprocess was cancelled before spawn"));
+          return;
+        }
         this.process = spawn("claude", args, {
           cwd: options.cwd || process.cwd(),
           env: getCleanClaudeEnv(),
           stdio: ["pipe", "pipe", "pipe"],
         });
+        this.closed = false;
 
         this.process.on("error", (err: NodeJS.ErrnoException) => {
           const mapped =
@@ -263,6 +276,7 @@ export class ClaudeSubprocess extends EventEmitter {
         });
 
         this.process.on("close", (code: number | null) => {
+          this.closed = true;
           log("subprocess.close", { pid: this.process?.pid, code });
           subprocessRegistry.unregister(this);
           if (this.buffer.trim()) {
@@ -295,6 +309,9 @@ export class ClaudeSubprocess extends EventEmitter {
 
     if (options.isResume && options.sessionId) {
       args.push("--resume", options.sessionId);
+      if (options.forkSession) {
+        args.push("--fork-session");
+      }
     } else if (options.sessionId) {
       args.push("--session-id", options.sessionId);
     }
@@ -375,9 +392,10 @@ export class ClaudeSubprocess extends EventEmitter {
    * Kill the subprocess with escalation: SIGTERM -> SIGKILL after 5s grace.
    */
   kill(): void {
-    if (this.killed || !this.process) return;
+    if (this.killed) return;
 
     this.killed = true;
+    if (!this.process) return;
     const pid = this.process.pid;
 
     log("subprocess.kill", { pid, signal: "SIGTERM" });
@@ -401,6 +419,69 @@ export class ClaudeSubprocess extends EventEmitter {
         clearTimeout(this.escalationTimer);
         this.escalationTimer = null;
       }
+    });
+  }
+
+  /**
+   * Stop the subprocess and resolve only after it closes, or after bounded
+   * SIGTERM/SIGKILL escalation has been exhausted. Calling this before spawn
+   * prevents a pending start() from creating the child later.
+   */
+  stop(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise;
+    if (!this.process || this.closed) {
+      this.kill();
+      return Promise.resolve();
+    }
+
+    const proc = this.process;
+    this.stopPromise = new Promise<void>((resolve) => {
+      let settled = false;
+      let forceReleaseTimer: ReturnType<typeof setTimeout> | null = null;
+      const settle = (): void => {
+        if (settled) return;
+        settled = true;
+        if (forceReleaseTimer) {
+          clearTimeout(forceReleaseTimer);
+        }
+        resolve();
+      };
+
+      proc.once("close", settle);
+      if (proc.exitCode === null) {
+        this.kill();
+      }
+      forceReleaseTimer = setTimeout(
+        settle,
+        KILL_ESCALATION_MS + KILL_FORCE_RELEASE_MS,
+      );
+    });
+    return this.stopPromise;
+  }
+
+  /**
+   * Wait for stdout/stderr and the child process to fully close before the
+   * caller releases its queue slot. A result event can arrive before `close`,
+   * so a short grace period is followed by the same bounded stop escalation
+   * used for cancellation.
+   */
+  waitForExit(graceMs = KILL_FORCE_RELEASE_MS): Promise<void> {
+    if (!this.process || this.closed) return Promise.resolve();
+    const proc = this.process;
+    return new Promise<void>((resolve) => {
+      let settled = false;
+      let graceTimer: ReturnType<typeof setTimeout> | null = null;
+      const settle = (): void => {
+        if (settled) return;
+        settled = true;
+        if (graceTimer) clearTimeout(graceTimer);
+        proc.removeListener("close", settle);
+        resolve();
+      };
+      proc.once("close", settle);
+      graceTimer = setTimeout(() => {
+        void this.stop().finally(settle);
+      }, Math.max(0, graceMs));
     });
   }
 

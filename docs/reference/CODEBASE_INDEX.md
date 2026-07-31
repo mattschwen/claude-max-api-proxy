@@ -19,11 +19,14 @@ it.
 - HTTP app wiring: `src/server/index.ts`
 - Route validation and endpoint orchestration: `src/server/routes.ts`
 - Conversation queue and cancellation state: `src/server/request-queue.ts`
+- Request identity and per-call policy: `src/server/request-context.ts`
+- Durable turn admission/idempotency: `src/server/turn-admission.ts`
 - Request execution core: `src/server/chat-execution.ts`
 - CLI subprocess lifecycle: `src/subprocess/manager.ts`
 - Model discovery and runtime capability cache: `src/model-availability.ts`
 - Conversation -> Claude session resume mapping: `src/session/manager.ts`
 - Persistent local metrics/history store: `src/store/conversation.ts`
+- Runtime model/provider feature scanner: `src/feature-scanner.ts`
 - OpenAI/Responses adapters: `src/adapter/`
 - Built-in agent catalog: `src/agents.ts`
 - Optional host/plugin export: `src/index.ts`
@@ -34,8 +37,9 @@ The standalone server starts in this order:
 
 1. `verifyClaude()` checks that the `claude` binary exists.
 2. `verifyAuth()` checks `claude auth status`.
-3. `modelAvailability.getSnapshot(true)` probes `sonnet`, `opus`, `fable`, and `haiku`
-   and caches the exact versioned model IDs the local CLI resolves.
+3. `modelAvailability.getSnapshot(true)` probes `default`, `sonnet`, `opus`,
+   `fable`, and `haiku`, prefers the resolved account-tier default for omitted
+   requests, and caches the exact versioned model IDs the local CLI resolves.
 4. `startServer()` binds the Express app.
 
 While the process is running:
@@ -55,12 +59,13 @@ For `POST /v1/chat/completions`:
    If the caller explicitly named a configured external model ID, route there.
    Otherwise the implicit path remains Claude.
 4. Normalize reasoning settings from request body, headers, and runtime default.
-5. Choose the conversation key from OpenAI `user` or the request id.
+5. Resolve the conversation key from `conversation_id`, metadata, header,
+   legacy OpenAI `user`, or the request id.
 6. Apply the same-conversation policy:
    - `latest-wins`: cancel in-flight work and drop stale queued work
    - `queue`: run FIFO per conversation
-7. Get or create a Claude CLI session id from `sessionManager`.
-8. Persist conversation metadata and the last user message in SQLite.
+7. Atomically admit a durable turn and apply its idempotency key.
+8. Fork the last committed Claude CLI session for resumable work.
 9. Convert OpenAI-shaped input into `CliInput`.
 10. Spawn a fresh `claude` subprocess and stream or buffer its output.
 11. Persist assistant output and request metrics.
@@ -69,7 +74,8 @@ For `POST /v1/chat/completions`:
 For `POST /v1/responses`:
 
 - `src/adapter/responses.ts` converts the request into a chat request.
-- `previous_response_id` is mapped back to a stored conversation id.
+- `previous_response_id` is mapped back to a durable turn checkpoint.
+- Each implicit child branches to a distinct queue/session head.
 - The route reuses `handleChatCompletions()` and wraps the final response back
   into a minimal Responses API payload.
 - Streaming Responses API is intentionally not implemented.
@@ -82,17 +88,28 @@ For `POST /v1/responses`:
 | `src/server/index.ts` | Express app setup | Registers routes, CORS, JSON body parsing, optional admin API |
 | `src/server/routes.ts` | Route orchestration | Validation, model/reasoning resolution, Responses bridge, health/admin endpoints |
 | `src/server/request-queue.ts` | Conversation queue manager | FIFO queueing, latest-wins supersession, active-request cancellation, queue pressure logging |
+| `src/server/request-context.ts` | Request identity | Conversation-ID precedence, per-request policy, idempotency/header helpers |
+| `src/server/turn-admission.ts` | Durable turn gate | Idempotent replay/conflict handling before queue execution |
 | `src/server/chat-execution.ts` | Request execution core | Streaming and non-streaming subprocess lifecycle, retries, SSE/error shaping, stall tracking |
+| `src/server/external-chat.ts` | External request execution | Provider routing, streaming, timeout, cancellation, and durable transcript handling |
 | `src/server/auth-retry.ts` | Shared retry helper | Centralizes single retry on upstream auth failures |
 | `src/server/runtime-snapshot.ts` | Runtime inspection helpers | Aggregates health/runtime state for `/health` and `/metrics` |
+| `src/server/health-models.ts` | Public model health | Merges Claude and per-model external probe state without overstating availability |
 | `src/server/queue-snapshot.ts` | Queue summarizer | Computes queue depth and wait-time rollups for diagnostics |
 | `src/server/response-conversations.ts` | Responses API bridge state | Maps `previous_response_id` values back to conversation ids |
+| `src/server/admin-access.ts` | Admin authorization | Loopback default and timing-safe bearer-token validation |
 | `src/adapter/openai-to-cli.ts` | OpenAI -> CLI adapter | Flattens message content, extracts system/developer text, resume mode |
 | `src/adapter/cli-to-openai.ts` | CLI -> OpenAI adapter | Builds chunks/final responses and usage fallbacks |
 | `src/adapter/responses.ts` | Responses API bridge | Minimal non-streaming Responses support |
 | `src/agents.ts` | Built-in agent catalog | Currently ships one agent: `expert-coder` |
 | `src/models.ts` | Stable model registry | Owns family aliases, timeout policy, provider-prefix stripping |
 | `src/model-availability.ts` | Runtime model resolver | Caches auth/CLI/model probe results and picks defaults |
+| `src/feature-scanner.ts` | Feature refresh loop | Periodically probes Claude and configured external providers |
+| `src/external-providers.ts` | External provider registry | Validates model ownership and resolves explicit provider routes |
+| `src/fallback-provider.ts` | OpenAI-compatible provider | Multi-model forwarding, upstream ID mapping, probes, and availability |
+| `src/gemini-cli-provider.ts` | Gemini CLI provider | Keyless local Gemini execution and OpenAI response adaptation |
+| `src/host-model-definition.ts` | Host model metadata | Builds host/plugin definitions from successfully probed Claude models |
+| `src/startup-policy.ts` | Startup policy | Enforces required-Claude zero-model behavior |
 | `src/reasoning.ts` | Reasoning normalization | Merges `thinking`, `reasoning`, `reasoning_effort`, header, and defaults |
 | `src/subprocess/manager.ts` | `claude` subprocess wrapper | Spawn args, stream parsing, registry, kill escalation |
 | `src/subprocess/pool.ts` | CLI warm-up loop | Reduces cold-start latency but does not reuse request workers |
@@ -118,6 +135,7 @@ Always available:
 - `GET /v1/agents/:agentId`
 - `POST /v1/chat/completions`
 - `POST /v1/responses`
+- `DELETE /v1/requests/:requestId`
 - `POST /v1/agents/:agentId/chat/completions`
 - `POST /v1/agents/:agentId/responses`
 
@@ -126,6 +144,8 @@ Conditionally available:
 - `GET /admin/thinking-budget`
 - `POST /admin/thinking-budget`
 - `PUT /admin/thinking-budget`
+- `POST /admin/features/refresh`
+- `POST /admin/conversations/:conversationId/reset`
 
 The admin endpoints only exist when `CLAUDE_PROXY_ENABLE_ADMIN_API=true`.
 
@@ -151,6 +171,7 @@ Stable families:
 
 - `sonnet`
 - `opus`
+- `fable`
 - `haiku`
 
 Important rules:
@@ -161,7 +182,9 @@ Important rules:
   actual resolved model ids for 10 minutes.
 - `resolveRequestedModel()` accepts either the family alias or an exact
   resolved id returned by `/v1/models`.
-- Default family preference is `sonnet`, then `opus`, then `fable`, then `haiku`.
+- Omitted/`default` requests prefer the successfully probed account-tier
+  `default`; if that selector is absent, the family fallback preference is
+  `sonnet`, then `opus`, then `fable`, then `haiku`.
 - External provider models can also appear in `/v1/models`, but they are
   explicit routes only. Omitting `model` still means Claude.
 
@@ -192,16 +215,18 @@ Per-conversation queueing lives entirely in `src/server/request-queue.ts`.
 
 Key behavior:
 
-- Conversation key = OpenAI `user` field, else request id
+- Conversation key = body/metadata/header `conversation_id`, legacy `user`, or request id
 - Default policy = `latest-wins`
 - Alternative policy = `queue`
+- Per-request override = `conversation_policy` or `X-Conversation-Policy`
+- Independent conversations run up to the configured global concurrency
 - Maximum queued depth per conversation = `5`
 - Queue timeout = request hard timeout + dynamic queue buffer
 - Active request supersession returns `409 request_superseded`
 
 Implication:
 
-If a client reuses the same `user` value across unrelated threads, those
+If a client reuses the same conversation ID across unrelated threads, those
 threads will interfere with each other by design.
 
 ## Session and Persistence Model
@@ -226,9 +251,10 @@ There are three distinct layers of state:
 Session lifecycle rules:
 
 - Sessions older than 6 hours are considered stale and recreated.
-- Sessions reset after more than 50 tasks.
+- Sessions reset after more than 50 successfully committed tasks.
 - Two consecutive resume failures invalidate a session.
-- Hard timeouts delete the session.
+- Resumed work is forked, so cancellation and hard timeouts preserve the last
+  committed parent session.
 - Stall timeouts mark the session as failed but do not immediately delete it.
 
 ## Subprocess and Auth Safety
@@ -291,7 +317,9 @@ High-signal events include:
 `GET /health` aggregates:
 
 - auth snapshot
-- runtime model availability
+- merged Claude/external model availability, including advertised,
+  configured-but-unprobed, and unavailable states
+- external-provider probe state
 - current CLI capabilities
 - warm-pool state
 - active subprocess pids
@@ -308,7 +336,9 @@ High-signal events include:
 - live runtime gauges such as active requests, queued requests, active subprocesses, active sessions, store size, and model availability
 - Node process uptime, CPU, and memory
 
-After 3 consecutive auth-check failures, `/health` returns `503`.
+After 3 consecutive auth-check failures, `/health` returns `503` when
+`CLAUDE_PROXY_REQUIRE_CLAUDE=true`. External-only deployments remain healthy
+while reporting Claude as degraded.
 
 ## Deployment and Packaging
 

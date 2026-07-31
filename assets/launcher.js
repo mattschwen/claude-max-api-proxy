@@ -10,13 +10,15 @@ const state = {
     : [],
   eventSource: null,
   models: [],
+  modelCatalog: {
+    loading: true,
+    error: null,
+  },
+  capabilities: null,
   connected: false,
   lab: {
-    messages: [],
-    pendingMessageId: null,
-    sending: false,
-    controller: null,
-    conversationId: generateConversationId(),
+    threads: new Map(),
+    currentThreadId: null,
   },
 };
 
@@ -56,9 +58,15 @@ const dom = {
   sessionList: document.getElementById("sessionList"),
   logList: document.getElementById("logList"),
   labStatusPill: document.getElementById("labStatusPill"),
+  labThreadSummary: document.getElementById("labThreadSummary"),
+  labThreadList: document.getElementById("labThreadList"),
+  labNewThreadButton: document.getElementById("labNewThreadButton"),
+  labBranchThreadButton: document.getElementById("labBranchThreadButton"),
   labModelSelect: document.getElementById("labModelSelect"),
   labModelInput: document.getElementById("labModelInput"),
+  labModelHelp: document.getElementById("labModelHelp"),
   labConversationInput: document.getElementById("labConversationInput"),
+  labPolicySelect: document.getElementById("labPolicySelect"),
   labSystemInput: document.getElementById("labSystemInput"),
   labTranscript: document.getElementById("labTranscript"),
   labPromptInput: document.getElementById("labPromptInput"),
@@ -75,7 +83,18 @@ const dom = {
   labResponseConversation: document.getElementById("labResponseConversation"),
   labRequestPreview: document.getElementById("labRequestPreview"),
   labRawOutput: document.getElementById("labRawOutput"),
+  labComposerHint: document.getElementById("labComposerHint"),
+  labAnnouncement: document.getElementById("labAnnouncement"),
 };
+
+class LabRequestError extends Error {
+  constructor(message, code = null, status = null) {
+    super(message);
+    this.name = "LabRequestError";
+    this.code = code;
+    this.status = status;
+  }
+}
 
 function readJson(id) {
   const element = document.getElementById(id);
@@ -158,11 +177,137 @@ function readCurrentModel() {
 }
 
 function generateConversationId() {
-  return `lab-${Date.now().toString(36)}`;
+  return `lab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 }
 
 function makeMessageId() {
   return `msg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function makeThread(conversationId = generateConversationId(), options = {}) {
+  return {
+    id: conversationId,
+    conversationId,
+    title: options.title || "New thread",
+    messages: Array.isArray(options.messages) ? options.messages : [],
+    requests: new Map(),
+    model: options.model || "default",
+    customModel: options.customModel || "",
+    systemPrompt: options.systemPrompt || "",
+    draft: options.draft || "",
+    stream: options.stream ?? true,
+    policy:
+      options.policy ||
+      (state.snapshot?.config?.sameConversationPolicy === "queue"
+        ? "queue"
+        : "interrupt"),
+    loading: false,
+    loadError: null,
+    inspector: {
+      status: "ready",
+      model: options.model || "pending",
+      conversationId,
+      latency: "idle",
+      latencyState: "ready",
+      requestPreview: {
+        model: options.model || "default",
+        messages: [],
+      },
+      rawOutput: "No response yet.",
+    },
+  };
+}
+
+function getCurrentThread() {
+  return state.lab.currentThreadId
+    ? state.lab.threads.get(state.lab.currentThreadId) || null
+    : null;
+}
+
+function getActiveRequests(thread) {
+  if (!thread) return [];
+  return Array.from(thread.requests.values()).filter((request) =>
+    ["queued", "running", "superseding", "stopping"].includes(request.status),
+  );
+}
+
+function getThreadStatus(thread) {
+  const active = getActiveRequests(thread);
+  if (active.some((request) => request.status === "running")) return "running";
+  if (active.some((request) => request.status === "superseding")) return "interrupting";
+  if (active.some((request) => request.status === "stopping")) return "stopping";
+  if (active.length) return "queued";
+  return thread?.inspector?.status || "ready";
+}
+
+function titleFromMessages(messages) {
+  const firstUser = messages.find(
+    (message) => message.role === "user" && String(message.content || "").trim(),
+  );
+  if (!firstUser) return "New thread";
+  const compact = String(firstUser.content).replace(/\s+/g, " ").trim();
+  return compact.length > 42 ? `${compact.slice(0, 41)}…` : compact;
+}
+
+function announce(message) {
+  dom.labAnnouncement.textContent = "";
+  requestAnimationFrame(() => {
+    dom.labAnnouncement.textContent = message;
+  });
+}
+
+function saveCurrentThreadControls() {
+  const thread = getCurrentThread();
+  if (!thread) return;
+  thread.conversationId = dom.labConversationInput.value.trim() || thread.id;
+  thread.model = dom.labModelSelect.value || "default";
+  thread.customModel = dom.labModelInput.value.trim();
+  thread.systemPrompt = dom.labSystemInput.value;
+  thread.draft = dom.labPromptInput.value;
+  thread.stream = Boolean(dom.labStreamToggle.checked);
+  thread.policy = dom.labPolicySelect.value === "queue"
+    ? "queue"
+    : "interrupt";
+}
+
+function loadThreadControls(thread) {
+  dom.labConversationInput.value = thread.conversationId;
+  dom.labModelInput.value = thread.customModel;
+  const desiredModel = thread.model || "default";
+  if (Array.from(dom.labModelSelect.options).some((option) => option.value === desiredModel)) {
+    dom.labModelSelect.value = desiredModel;
+  } else if (desiredModel && !thread.customModel) {
+    dom.labModelInput.value = desiredModel;
+    thread.customModel = desiredModel;
+  }
+  dom.labSystemInput.value = thread.systemPrompt;
+  dom.labPromptInput.value = thread.draft;
+  dom.labStreamToggle.checked = thread.stream;
+  dom.labPolicySelect.value = thread.policy === "queue"
+    ? "queue"
+    : "interrupt";
+}
+
+function createThread(options = {}) {
+  const thread = makeThread(options.conversationId, options);
+  state.lab.threads.set(thread.id, thread);
+  return thread;
+}
+
+function switchThread(threadId) {
+  const next = state.lab.threads.get(threadId);
+  if (!next) return;
+  saveCurrentThreadControls();
+  state.lab.currentThreadId = threadId;
+  loadThreadControls(next);
+  renderLab();
+  dom.labPromptInput.focus();
+}
+
+function createAndSwitchThread(options = {}) {
+  const thread = createThread(options);
+  switchThread(thread.id);
+  return thread;
 }
 
 function setStatusPill(element, text, stateName) {
@@ -195,61 +340,241 @@ function collectSuggestedModels(snapshot) {
   const seen = new Set();
   const models = [];
 
-  const add = (value) => {
+  const add = (value, details = {}) => {
     const normalized = String(value || "").trim();
     if (!normalized || seen.has(normalized)) return;
     seen.add(normalized);
-    models.push(normalized);
+    models.push({
+      id: normalized,
+      ownedBy: details.ownedBy || (
+        normalized.startsWith("gemini-")
+          ? "google"
+          : normalized.startsWith("glm-")
+            ? "zai"
+            : "anthropic"
+      ),
+      available: details.available !== false,
+      availability:
+        details.availability || (details.available === false ? "unavailable" : "available"),
+      message: details.message || "",
+      family: details.family || "",
+      capabilities: details.capabilities || null,
+    });
   };
 
-  add("default");
-  add("sonnet");
+  add("default", { ownedBy: "alias", family: "alias" });
 
-  (snapshot?.availability?.available || []).forEach((entry) => add(entry.id));
-  (snapshot?.availability?.unavailable || []).forEach((entry) => add(entry.id));
-  (snapshot?.recentConversations || []).forEach((entry) => add(entry.model));
+  (snapshot?.availability?.available || []).forEach((entry) =>
+    add(entry.id, {
+      ownedBy: "anthropic",
+      family: entry.family,
+      available: true,
+      availability: "available",
+    }));
   (snapshot?.config?.externalProviders || []).forEach((provider) => {
-    add(provider.model);
-    (provider.extraModels || []).forEach((model) => add(model));
+    add(provider.model, {
+      ownedBy: provider.provider,
+      family: provider.transport,
+      available: true,
+      availability: "configured",
+    });
+    (provider.extraModels || []).forEach((model) =>
+      add(model, {
+        ownedBy: provider.provider,
+        family: provider.transport,
+        available: true,
+        availability: "configured",
+      }));
   });
+  (snapshot?.recentConversations || []).forEach((entry) =>
+    add(entry.model, { available: true }));
+  (snapshot?.availability?.unavailable || []).forEach((entry) =>
+    add(entry.id, {
+      ownedBy: "anthropic",
+      family: entry.family,
+      available: false,
+      availability: "unavailable",
+      message: entry.message,
+    }));
 
   return models;
 }
 
+function normalizeModelEntries(models) {
+  return (models || [])
+    .map((entry) => {
+      if (typeof entry === "string") {
+        return {
+          id: entry,
+          ownedBy: "unknown",
+          available: true,
+          availability: "available",
+          message: "",
+          capabilities: null,
+        };
+      }
+      const availability = String(
+        entry?.availability || (entry?.available === false ? "unavailable" : "available"),
+      );
+      return {
+        id: String(entry?.id || "").trim(),
+        ownedBy: String(entry?.ownedBy || entry?.owned_by || "unknown"),
+        available: entry?.available !== false && availability !== "unavailable",
+        availability,
+        message: String(entry?.message || ""),
+        family: String(entry?.family || ""),
+        capabilities: entry?.capabilities || null,
+      };
+    })
+    .filter((entry) => entry.id);
+}
+
+function providerLabel(value) {
+  const provider = String(value || "").toLowerCase();
+  if (provider === "anthropic") return "Claude";
+  if (provider === "google" || provider === "gemini-cli") return "Gemini";
+  if (provider === "zai") return "Z.AI / GLM";
+  if (provider === "alias") return "Routing";
+  return provider ? provider.replace(/[-_]/g, " ") : "Other";
+}
+
 function updateModelChoices(models) {
   const current = readCurrentModel();
-  const choices = models.length ? models : collectSuggestedModels(state.snapshot);
+  const supplied = normalizeModelEntries(models);
+  const choices = supplied.length
+    ? supplied
+    : collectSuggestedModels(state.snapshot);
+  if (!choices.some((entry) => entry.id === "default")) {
+    choices.unshift({
+      id: "default",
+      ownedBy: "alias",
+      available: true,
+      availability: "available",
+      message: "",
+      family: "alias",
+      capabilities: null,
+    });
+  }
   state.models = choices;
 
-  dom.labModelSelect.innerHTML = choices
-    .map(
-      (model) =>
-        `<option value="${escapeHtml(model)}">${escapeHtml(humanizeModel(model))}</option>`,
-    )
+  const groups = new Map();
+  choices.forEach((model) => {
+    const key = model.id === "default" ? "Routing" : providerLabel(model.ownedBy);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(model);
+  });
+  dom.labModelSelect.innerHTML = Array.from(groups.entries())
+    .map(([label, entries]) => `
+      <optgroup label="${escapeHtml(label)}">
+        ${entries
+          .map(
+            (model) => `
+              <option
+                value="${escapeHtml(model.id)}"
+                ${model.available ? "" : "disabled"}
+              >${escapeHtml(humanizeModel(model.id))}${
+                model.availability === "configured"
+                  ? " — configured"
+                  : model.available
+                    ? ""
+                    : " — unavailable"
+              }</option>
+            `,
+          )
+          .join("")}
+      </optgroup>
+    `)
     .join("");
 
-  if (choices.includes(current)) {
+  if (choices.some((entry) => entry.id === current && entry.available)) {
     dom.labModelSelect.value = current;
+  } else {
+    dom.labModelSelect.value = "default";
   }
 
   renderLabBadges();
+  renderModelHelp();
 }
 
 async function fetchModels() {
+  state.modelCatalog.loading = true;
+  state.modelCatalog.error = null;
+  renderModelHelp();
   try {
-    const response = await fetch(links.models, {
+    const capabilitiesRequest = fetch(links.capabilities, {
+      headers: { accept: "application/json" },
+      cache: "no-store",
+    }).catch(() => null);
+    const modelResponse = await fetch(links.models, {
       headers: { accept: "application/json" },
       cache: "no-store",
     });
-    if (!response.ok) {
-      throw new Error(String(response.status));
+    if (!modelResponse.ok) {
+      throw new Error(`Model catalog returned ${modelResponse.status}`);
     }
-    const payload = await response.json();
-    const models = Array.isArray(payload?.data)
-      ? payload.data.map((entry) => entry.id).filter(Boolean)
-      : [];
+    const payload = await modelResponse.json();
+    const capabilitiesResponse = await capabilitiesRequest;
+    state.capabilities = capabilitiesResponse?.ok
+      ? await capabilitiesResponse.json()
+      : null;
+    const modelMap = new Map(
+      (Array.isArray(payload?.data) ? payload.data : [])
+        .filter((entry) => entry?.id)
+        .map((entry) => [
+          entry.id,
+          {
+            id: entry.id,
+            ownedBy: entry.owned_by,
+            available: true,
+            availability: "available",
+          },
+        ]),
+    );
+    (Array.isArray(state.capabilities?.models?.catalog)
+      ? state.capabilities.models.catalog
+      : []
+    ).forEach((entry) => {
+      if (!entry?.id) return;
+      const availability = String(entry.availability || "configured");
+      const errorMessage =
+        typeof entry.error === "string"
+          ? entry.error
+          : String(entry.error?.message || "");
+      modelMap.set(entry.id, {
+        ...(modelMap.get(entry.id) || {}),
+        id: entry.id,
+        ownedBy: entry.provider,
+        family: entry.transport,
+        availability,
+        available: availability !== "unavailable",
+        message: errorMessage,
+        capabilities: entry.capabilities || null,
+      });
+    });
+    (Array.isArray(state.capabilities?.models?.acceptedSelectors)
+      ? state.capabilities.models.acceptedSelectors
+      : []
+    ).forEach((selector) => {
+      const id = String(selector || "").trim();
+      if (!id || modelMap.has(id)) return;
+      modelMap.set(id, {
+        id,
+        ownedBy: "alias",
+        family: "selector",
+        availability: "selector",
+        available: true,
+        message: id.endsWith("[1m]")
+          ? "Claude Code validates extended-context access when sent."
+          : "",
+        capabilities: null,
+      });
+    });
+    const models = Array.from(modelMap.values());
+    state.modelCatalog.loading = false;
     updateModelChoices(models);
-  } catch {
+  } catch (error) {
+    state.modelCatalog.loading = false;
+    state.modelCatalog.error = error instanceof Error ? error.message : String(error);
     updateModelChoices([]);
   }
 }
@@ -257,6 +582,258 @@ async function fetchModels() {
 function renderLabBadges() {
   dom.labConversationBadge.textContent = shortId(dom.labConversationInput.value.trim(), 16);
   dom.labModelBadge.textContent = humanizeModel(readCurrentModel());
+}
+
+function renderModelHelp() {
+  if (state.modelCatalog.loading) {
+    dom.labModelHelp.textContent = "Loading model and capability catalog…";
+    dom.labModelHelp.dataset.state = "loading";
+    return;
+  }
+  if (state.modelCatalog.error) {
+    dom.labModelHelp.textContent =
+      `Live model catalog unavailable (${state.modelCatalog.error}). Showing the latest runtime snapshot.`;
+    dom.labModelHelp.dataset.state = "error";
+    return;
+  }
+
+  const selectedId = readCurrentModel();
+  const selected = state.models.find((entry) => entry.id === selectedId);
+  const custom = dom.labModelInput.value.trim();
+  if (custom) {
+    dom.labModelHelp.textContent =
+      `Custom exact model “${custom}” overrides the catalog selection. The proxy will validate it when sent.`;
+    dom.labModelHelp.dataset.state = "warn";
+    return;
+  }
+  if (!selected) {
+    dom.labModelHelp.textContent = "Choose an available model or enter an exact custom ID.";
+    dom.labModelHelp.dataset.state = "warn";
+    return;
+  }
+  if (selected.id === "default") {
+    dom.labModelHelp.textContent =
+      "Default keeps the request on Claude and follows Claude Code’s account-tier recommendation.";
+    dom.labModelHelp.dataset.state = "ready";
+    return;
+  }
+
+  const adaptive =
+    selected.capabilities?.adaptiveReasoning === true ||
+    (
+      Array.isArray(state.capabilities?.reasoning?.adaptiveModels) &&
+      state.capabilities.reasoning.adaptiveModels.includes(selected.id)
+    );
+  const availability = selected.availability || (
+    selected.available ? "available" : "unavailable"
+  );
+  dom.labModelHelp.textContent =
+    `${providerLabel(selected.ownedBy)} · ${availability}${availability === "configured" ? " (not health-checked)" : ""}${adaptive ? " · adaptive reasoning" : ""}${selected.message ? ` · ${selected.message}` : ""}`;
+  dom.labModelHelp.dataset.state =
+    availability === "unavailable"
+      ? "error"
+      : availability === "configured"
+        ? "warn"
+        : "ready";
+}
+
+function renderLabThreadList() {
+  const threads = Array.from(state.lab.threads.values());
+  const focusedThreadId =
+    document.activeElement?.closest?.("[data-thread-id]")?.getAttribute(
+      "data-thread-id",
+    ) || null;
+  dom.labThreadSummary.textContent =
+    `${formatCount(threads.length)} local thread${threads.length === 1 ? "" : "s"}`;
+
+  dom.labThreadList.innerHTML = threads
+    .map((thread) => {
+      const selected = thread.id === state.lab.currentThreadId;
+      const status = getThreadStatus(thread);
+      return `
+        <button
+          class="thread-tab${selected ? " is-selected" : ""}"
+          type="button"
+          role="tab"
+          aria-selected="${selected ? "true" : "false"}"
+          tabindex="${selected ? "0" : "-1"}"
+          data-thread-id="${escapeHtml(thread.id)}"
+          data-state="${escapeHtml(status)}"
+        >
+          <span class="thread-tab-title">${escapeHtml(thread.title)}</span>
+          <span class="thread-tab-meta">
+            ${escapeHtml(shortId(thread.conversationId, 12))} · ${escapeHtml(status)}
+          </span>
+        </button>
+      `;
+    })
+    .join("");
+
+  dom.labThreadList.querySelectorAll("[data-thread-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      switchThread(button.getAttribute("data-thread-id"));
+    });
+  });
+  if (focusedThreadId) {
+    dom.labThreadList
+      .querySelector(`[data-thread-id="${CSS.escape(focusedThreadId)}"]`)
+      ?.focus({ preventScroll: true });
+  }
+}
+
+function renderInspector() {
+  const thread = getCurrentThread();
+  if (!thread) return;
+  const inspector = thread.inspector;
+  dom.labResponseStatus.textContent = inspector.status;
+  dom.labResponseModel.textContent = humanizeModel(inspector.model);
+  dom.labResponseConversation.textContent = shortId(
+    inspector.conversationId || thread.conversationId,
+    16,
+  );
+  setStatusPill(
+    dom.labLatencyBadge,
+    inspector.latency,
+    inspector.latencyState || "ready",
+  );
+  dom.labRawOutput.textContent = inspector.rawOutput || "No response yet.";
+  renderLabRequestPreview(inspector.requestPreview || {
+    model: readCurrentModel(),
+    messages: [],
+  });
+}
+
+function renderLab() {
+  renderLabThreadList();
+  renderLabBadges();
+  renderModelHelp();
+  renderTranscript();
+  renderInspector();
+  updateLabControls();
+}
+
+function addNewThread() {
+  saveCurrentThreadControls();
+  const current = getCurrentThread();
+  createAndSwitchThread({
+    model: current?.model || "default",
+    customModel: current?.customModel || "",
+    systemPrompt: current?.systemPrompt || "",
+    stream: current?.stream ?? true,
+    policy: current?.policy,
+  });
+  announce("New independent thread created.");
+}
+
+function branchCurrentThread() {
+  saveCurrentThreadControls();
+  const current = getCurrentThread();
+  if (!current) return;
+  const messages = current.messages
+    .filter(
+      (message) =>
+        (message.role === "user" && message.status === "complete") ||
+        (message.role === "assistant" && message.status === "complete"),
+    )
+    .map((message) => ({
+      ...message,
+      id: makeMessageId(),
+      requestId: undefined,
+      meta: message.meta || "history",
+      status: "complete",
+    }));
+  const thread = createAndSwitchThread({
+    title: `Branch · ${current.title}`,
+    messages,
+    model: current.model,
+    customModel: current.customModel,
+    systemPrompt: current.systemPrompt,
+    stream: current.stream,
+    policy: current.policy,
+  });
+  thread.inspector.status = "ready";
+  thread.inspector.rawOutput =
+    "Branched locally. The first send will create a new proxy conversation with this transcript.";
+  renderLab();
+  announce(`Branched ${current.title} into a new conversation.`);
+}
+
+async function resumeStoredConversation(conversationId, options = {}) {
+  if (!conversationId) return;
+  const existing = Array.from(state.lab.threads.values()).find(
+    (thread) => thread.conversationId === conversationId,
+  );
+  if (existing && !options.force) {
+    switchThread(existing.id);
+    announce(`Switched to ${existing.title}.`);
+    return;
+  }
+
+  const thread = existing || createThread({
+    conversationId,
+    title: `Conversation ${shortId(conversationId, 10)}`,
+  });
+  thread.loading = true;
+  thread.loadError = null;
+  switchThread(thread.id);
+
+  try {
+    const response = await fetch(
+      `/ops/conversations/${encodeURIComponent(conversationId)}?limit=64`,
+      { cache: "no-store" },
+    );
+    if (!response.ok) {
+      throw new Error(`Transcript returned ${response.status}`);
+    }
+    const detail = await response.json();
+    thread.messages = Array.isArray(detail?.messages)
+      ? detail.messages.map((message) => ({
+          id: makeMessageId(),
+          role: message.role || "assistant",
+          content: String(message.content || ""),
+          meta: message.created_at
+            ? stamp(new Date(message.created_at).toISOString())
+            : "stored",
+          status: "complete",
+        }))
+      : [];
+    thread.title = titleFromMessages(thread.messages);
+    const storedModel = detail?.conversation?.model;
+    if (storedModel) {
+      if (state.models.some((model) => model.id === storedModel && model.available)) {
+        thread.model = storedModel;
+        thread.customModel = "";
+      } else {
+        thread.customModel = storedModel;
+      }
+    }
+    thread.inspector = {
+      status: "resumed",
+      model: storedModel || thread.model,
+      conversationId,
+      latency: "stored",
+      latencyState: "ready",
+      requestPreview: {
+        model: storedModel || thread.model,
+        conversation_id: conversationId,
+        messages: thread.messages.map(({ role, content }) => ({ role, content })),
+      },
+      rawOutput: `Loaded ${thread.messages.length} stored messages from the operator snapshot.`,
+    };
+    thread.loading = false;
+    if (state.lab.currentThreadId === thread.id) {
+      loadThreadControls(thread);
+      renderLab();
+    } else {
+      renderLabThreadList();
+    }
+    announce(`Resumed ${thread.title}.`);
+  } catch (error) {
+    thread.loading = false;
+    thread.loadError = error instanceof Error ? error.message : String(error);
+    renderLab();
+    announce(`Could not resume conversation: ${thread.loadError}`);
+  }
 }
 
 function summarizeLog(entry) {
@@ -309,27 +886,43 @@ function renderConversations(snapshot) {
           : `idle ${formatAge(conversation.idleMs)}`;
 
       return `
-        <article class="stack-item">
-          <header>
-            <strong>${escapeHtml(humanizeModel(conversation.model))}</strong>
-            <span class="status-pill" data-state="${escapeHtml(
-              conversation.status === "active"
-                ? "running"
-                : conversation.status === "queued"
-                  ? "warn"
-                  : "ready",
-            )}">${escapeHtml(conversation.status)}</span>
-          </header>
-          <div class="detail">${escapeHtml(
-            `${formatCount(conversation.messageCount)} msgs • ${timer} • ${shortId(conversation.conversationId, 10)}`,
-          )}</div>
-          <div class="detail">${escapeHtml(
-            conversation.lastMessagePreview || "No stored preview yet.",
-          )}</div>
-        </article>
+        <div class="stack-list-item" role="listitem">
+          <button
+            class="stack-item stack-item--interactive"
+            type="button"
+            data-conversation-id="${escapeHtml(conversation.conversationId)}"
+            aria-label="Resume conversation ${escapeHtml(shortId(conversation.conversationId, 10))}"
+          >
+            <header>
+              <strong>${escapeHtml(humanizeModel(conversation.model))}</strong>
+              <span class="status-pill" data-state="${escapeHtml(
+                conversation.status === "active"
+                  ? "running"
+                  : conversation.status === "queued"
+                    ? "warn"
+                    : "ready",
+              )}">${escapeHtml(conversation.status)}</span>
+            </header>
+            <div class="detail">${escapeHtml(
+              `${formatCount(conversation.messageCount)} msgs • ${timer} • ${shortId(conversation.conversationId, 10)}`,
+            )}</div>
+            <div class="detail">${escapeHtml(
+              conversation.lastMessagePreview || "No stored preview yet.",
+            )}</div>
+            <div class="resume-label">Open in Chat Lab →</div>
+          </button>
+        </div>
       `;
     })
     .join("");
+
+  dom.conversationList
+    .querySelectorAll("[data-conversation-id]")
+    .forEach((button) => {
+      button.addEventListener("click", () => {
+        void resumeStoredConversation(button.getAttribute("data-conversation-id"));
+      });
+    });
 }
 
 function renderSessions(snapshot) {
@@ -432,25 +1025,68 @@ function applySnapshot(snapshot) {
   renderConversations(snapshot);
   renderSessions(snapshot);
   renderLogs();
-  updateModelChoices(state.models);
+  if (state.modelCatalog.error || !state.models.length) {
+    updateModelChoices([]);
+  }
+  renderLabThreadList();
+  renderLabBadges();
+  renderModelHelp();
+  updateLabControls();
 }
 
 function renderTranscript() {
-  if (!state.lab.messages.length) {
+  const thread = getCurrentThread();
+  if (!thread) {
+    dom.labTranscript.innerHTML =
+      '<div class="empty-state">Create a thread to start testing the proxy.</div>';
+    return;
+  }
+  if (thread.loading) {
+    dom.labTranscript.innerHTML =
+      '<div class="empty-state" data-state="loading">Loading stored conversation…</div>';
+    return;
+  }
+  if (thread.loadError) {
+    dom.labTranscript.innerHTML = `
+      <div class="empty-state" data-state="error">
+        <strong>Could not load this conversation.</strong>
+        <span>${escapeHtml(thread.loadError)}</span>
+        <button class="button button--compact" id="labRetryResumeButton" type="button">Retry</button>
+      </div>
+    `;
+    document.getElementById("labRetryResumeButton")?.addEventListener("click", () => {
+      void resumeStoredConversation(thread.conversationId, { force: true });
+    });
+    return;
+  }
+  if (!thread.messages.length) {
     dom.labTranscript.innerHTML =
       '<div class="empty-state">No messages yet. Send a prompt to test the proxy.</div>';
     return;
   }
 
-  dom.labTranscript.innerHTML = state.lab.messages
+  dom.labTranscript.innerHTML = thread.messages
     .map(
       (message) => `
-        <article class="message-card" data-role="${escapeHtml(message.role)}">
+        <article
+          class="message-card"
+          data-role="${escapeHtml(message.role)}"
+          data-status="${escapeHtml(message.status || "complete")}"
+        >
           <div class="message-head">
             <strong class="message-role" data-role="${escapeHtml(message.role)}">${escapeHtml(message.role)}</strong>
-            <span class="meta-badge">${escapeHtml(message.meta || "lab")}</span>
+            <span class="meta-badge" data-state="${escapeHtml(message.status || "ready")}">${escapeHtml(message.meta || "lab")}</span>
           </div>
-          <div class="message-body">${escapeHtml(message.content || "")}</div>
+          <div class="message-body">${escapeHtml(
+            message.content ||
+              (message.status === "queued"
+                ? "Waiting for the active turn to finish…"
+                : message.status === "running"
+                  ? "Waiting for the first token…"
+                  : message.status === "interrupted"
+                    ? "Interrupted before any text was returned."
+                    : ""),
+          )}</div>
         </article>
       `,
     )
@@ -462,19 +1098,37 @@ function renderTranscript() {
 }
 
 function updateLabControls() {
-  dom.labSendButton.disabled = state.lab.sending;
-  dom.labStopButton.disabled = !state.lab.sending;
-  dom.labModelSelect.disabled = state.lab.sending;
-  dom.labModelInput.disabled = state.lab.sending;
-  dom.labConversationInput.disabled = state.lab.sending;
-  dom.labSystemInput.disabled = state.lab.sending;
-  dom.labPromptInput.disabled = false;
+  const thread = getCurrentThread();
+  const active = getActiveRequests(thread);
+  const status = getThreadStatus(thread);
+  dom.labSendButton.disabled = !thread || thread.loading;
+  dom.labStopButton.disabled = active.length === 0;
+  dom.labResetButton.disabled = active.length > 0 || !thread;
+  dom.labBranchThreadButton.disabled = !thread || thread.loading;
+  dom.labPromptInput.disabled = !thread || thread.loading;
+  dom.labConversationInput.disabled =
+    !thread || thread.loading || active.length > 0;
 
-  if (state.lab.sending) {
-    setStatusPill(dom.labStatusPill, "Streaming", "streaming");
-  } else {
-    setStatusPill(dom.labStatusPill, "Ready", "ready");
-  }
+  const statusLabels = {
+    running: ["Running", "running"],
+    queued: ["Queued", "warn"],
+    interrupting: ["Interrupting", "warn"],
+    stopping: ["Stopping", "warn"],
+    interrupted: ["Interrupted", "warn"],
+    stopped: ["Stopped", "warn"],
+    error: ["Error", "error"],
+    success: ["Complete", "ok"],
+    resumed: ["Resumed", "ready"],
+    ready: ["Ready", "ready"],
+  };
+  const [label, stateName] = statusLabels[status] || ["Ready", "ready"];
+  setStatusPill(dom.labStatusPill, label, stateName);
+
+  const policy = thread?.policy === "queue" ? "queue" : "interrupt";
+  dom.labComposerHint.textContent =
+    policy === "queue"
+      ? "New prompts in this thread wait in order. Different threads run independently."
+      : "New prompts interrupt the active response in this thread. Different threads run independently.";
 }
 
 function renderLabRequestPreview(body) {
@@ -482,33 +1136,41 @@ function renderLabRequestPreview(body) {
 }
 
 function resetLab() {
-  state.lab.messages = [];
-  state.lab.pendingMessageId = null;
-  state.lab.conversationId = generateConversationId();
-  dom.labConversationInput.value = state.lab.conversationId;
-  dom.labPromptInput.value = "";
-  dom.labRawOutput.textContent = "No response yet.";
-  dom.labResponseStatus.textContent = "ready";
-  dom.labResponseModel.textContent = "pending";
-  dom.labResponseConversation.textContent = shortId(state.lab.conversationId, 16);
-  dom.labLatencyBadge.textContent = "idle";
-  setStatusPill(dom.labLatencyBadge, "idle", "ready");
-  renderLabBadges();
-  renderTranscript();
-  renderLabRequestPreview({
-    model: readCurrentModel(),
-    messages: [],
+  const current = getCurrentThread();
+  if (!current || getActiveRequests(current).length) return;
+  state.lab.threads.delete(current.id);
+  createAndSwitchThread({
+    model: current.model,
+    customModel: current.customModel,
+    systemPrompt: current.systemPrompt,
+    stream: current.stream,
+    policy: current.policy,
   });
+  announce("Current thread reset with a new conversation id.");
 }
 
-function buildLabMessages(userPrompt) {
+function buildLabMessages(thread, userPrompt) {
   const messages = [];
-  const systemPrompt = dom.labSystemInput.value.trim();
+  const systemPrompt = thread.systemPrompt.trim();
   if (systemPrompt) {
     messages.push({ role: "system", content: systemPrompt });
   }
-  state.lab.messages.forEach((message) => {
+  thread.messages.forEach((message) => {
     if (message.role === "error") return;
+    if (
+      message.role === "user" &&
+      message.status &&
+      message.status !== "complete"
+    ) {
+      return;
+    }
+    if (
+      message.role === "assistant" &&
+      message.status &&
+      message.status !== "complete"
+    ) {
+      return;
+    }
     messages.push({
       role: message.role === "system" ? "assistant" : message.role,
       content: message.content,
@@ -543,13 +1205,62 @@ function extractAssistantContent(payload) {
 async function parseErrorPayload(response) {
   try {
     const payload = await response.json();
-    return payload?.error?.message || JSON.stringify(payload);
+    return new LabRequestError(
+      payload?.error?.message || JSON.stringify(payload),
+      payload?.error?.code ?? null,
+      response.status,
+    );
   } catch {
-    return response.statusText || `Request failed: ${response.status}`;
+    return new LabRequestError(
+      response.statusText || `Request failed: ${response.status}`,
+      null,
+      response.status,
+    );
   }
 }
 
-async function consumeStream(response, assistantMessage) {
+function renderRequestUpdate(thread) {
+  if (state.lab.currentThreadId === thread.id) {
+    renderLab();
+  } else {
+    renderLabThreadList();
+  }
+}
+
+function processStreamPayload(payload, thread, request, assistantMessage) {
+  if (payload?.error) {
+    throw new LabRequestError(
+      payload.error.message || "The proxy returned a streaming error.",
+      payload.error.code ?? null,
+      payload.error.status ?? null,
+    );
+  }
+  if (payload?.model) {
+    request.servedModel = payload.model;
+    if (thread.latestRequestId === request.id) {
+      thread.inspector.model = payload.model;
+    }
+  }
+  const delta = payload?.choices?.[0]?.delta?.content;
+  if (typeof delta === "string") {
+    assistantMessage.content += delta;
+  } else if (Array.isArray(delta)) {
+    assistantMessage.content += delta
+      .map((part) => {
+        if (typeof part === "string") return part;
+        if (typeof part?.text === "string") return part.text;
+        return "";
+      })
+      .join("");
+  }
+  if (assistantMessage.content) {
+    assistantMessage.status = "running";
+    assistantMessage.meta = "streaming";
+  }
+  renderRequestUpdate(thread);
+}
+
+async function consumeStream(response, thread, request, assistantMessage) {
   if (!response.body) {
     throw new Error("Readable stream not available");
   }
@@ -567,11 +1278,11 @@ async function consumeStream(response, assistantMessage) {
     }
     buffer += decoder.decode(value, { stream: true });
 
-    let boundary = buffer.indexOf("\n\n");
-    while (boundary !== -1) {
-      const chunk = buffer.slice(0, boundary);
-      buffer = buffer.slice(boundary + 2);
-      boundary = buffer.indexOf("\n\n");
+    let boundary = /\r?\n\r?\n/.exec(buffer);
+    while (boundary) {
+      const chunk = buffer.slice(0, boundary.index);
+      buffer = buffer.slice(boundary.index + boundary[0].length);
+      boundary = /\r?\n\r?\n/.exec(buffer);
 
       const lines = chunk
         .split(/\r?\n/)
@@ -585,21 +1296,25 @@ async function consumeStream(response, assistantMessage) {
           continue;
         }
         const payload = JSON.parse(line);
-        const delta = payload?.choices?.[0]?.delta?.content;
-        if (typeof delta === "string") {
-          assistantMessage.content += delta;
-          renderTranscript();
-        } else if (Array.isArray(delta)) {
-          assistantMessage.content += delta
-            .map((part) => {
-              if (typeof part === "string") return part;
-              if (typeof part?.text === "string") return part.text;
-              return "";
-            })
-            .join("");
-          renderTranscript();
-        }
+        processStreamPayload(payload, thread, request, assistantMessage);
       }
+    }
+  }
+
+  const trailingLines = buffer
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.replace(/^data:\s*/, "").trim())
+    .filter(Boolean);
+  for (const line of trailingLines) {
+    rawEvents.push(line);
+    if (line !== "[DONE]") {
+      processStreamPayload(
+        JSON.parse(line),
+        thread,
+        request,
+        assistantMessage,
+      );
     }
   }
 
@@ -607,53 +1322,100 @@ async function consumeStream(response, assistantMessage) {
 }
 
 async function sendLabRequest() {
-  if (state.lab.sending) return;
+  const thread = getCurrentThread();
+  if (!thread || thread.loading) return;
   const userPrompt = dom.labPromptInput.value.trim();
-  if (!userPrompt) return;
+  if (!userPrompt) {
+    announce("Enter a prompt before sending.");
+    dom.labPromptInput.focus();
+    return;
+  }
+
+  saveCurrentThreadControls();
 
   const model = readCurrentModel();
-  const conversationId = dom.labConversationInput.value.trim() || state.lab.conversationId;
+  const conversationId = thread.conversationId || generateConversationId();
   dom.labConversationInput.value = conversationId;
-  state.lab.conversationId = conversationId;
   renderLabBadges();
+
+  const existingRequests = getActiveRequests(thread);
+  const policy = thread.policy === "queue" ? "queue" : "interrupt";
+  if (existingRequests.length && policy === "interrupt") {
+    existingRequests.forEach((existing) => {
+      existing.status = "superseding";
+      existing.userMessage.status = "interrupted";
+      existing.userMessage.meta = "interrupting";
+      existing.assistantMessage.status = "interrupted";
+      existing.assistantMessage.meta = "interrupting";
+    });
+  }
 
   const requestBody = {
     model,
-    stream: Boolean(dom.labStreamToggle.checked),
-    user: conversationId,
-    messages: buildLabMessages(userPrompt),
+    stream: thread.stream,
+    conversation_id: conversationId,
+    conversation_policy: policy,
+    messages: buildLabMessages(thread, userPrompt),
   };
 
-  renderLabRequestPreview(requestBody);
-
+  const requestId = makeMessageId();
+  const startsQueued = existingRequests.length > 0 && policy === "queue";
   const userMessage = {
     id: makeMessageId(),
+    requestId,
     role: "user",
     content: userPrompt,
-    meta: stamp(new Date().toISOString()),
+    meta: startsQueued ? "queued" : "sending",
+    status: startsQueued ? "queued" : "running",
   };
   const assistantMessage = {
     id: makeMessageId(),
+    requestId,
     role: "assistant",
     content: "",
-    meta: requestBody.stream ? "streaming" : "waiting",
+    meta: startsQueued ? "queued" : requestBody.stream ? "streaming" : "waiting",
+    status: startsQueued ? "queued" : "running",
   };
 
-  state.lab.messages.push(userMessage, assistantMessage);
-  state.lab.pendingMessageId = assistantMessage.id;
-  state.lab.sending = true;
-  updateLabControls();
-  renderTranscript();
-
+  thread.messages.push(userMessage, assistantMessage);
+  thread.title = titleFromMessages(thread.messages);
+  thread.draft = "";
   dom.labPromptInput.value = "";
-  dom.labResponseConversation.textContent = shortId(conversationId, 16);
-  dom.labResponseModel.textContent = humanizeModel(model);
-  dom.labResponseStatus.textContent = requestBody.stream ? "streaming" : "pending";
-  setStatusPill(dom.labStatusPill, requestBody.stream ? "Streaming" : "Running", "running");
 
   const controller = new AbortController();
-  state.lab.controller = controller;
   const startedAt = performance.now();
+  const request = {
+    id: requestId,
+    controller,
+    userMessage,
+    assistantMessage,
+    status: startsQueued ? "queued" : "running",
+    startedAt,
+    requestedModel: model,
+    servedModel: model,
+    stream: requestBody.stream,
+  };
+  thread.requests.set(requestId, request);
+  thread.latestRequestId = requestId;
+  thread.inspector = {
+    status: startsQueued ? "queued" : requestBody.stream ? "streaming" : "running",
+    model,
+    conversationId,
+    latency: startsQueued ? "queued" : "running",
+    latencyState: startsQueued ? "warn" : "running",
+    requestPreview: requestBody,
+    rawOutput: startsQueued
+      ? "Request accepted locally and waiting behind the active turn."
+      : "Waiting for proxy response…",
+  };
+  renderRequestUpdate(thread);
+  announce(
+    startsQueued
+      ? `Prompt queued in ${thread.title}.`
+      : existingRequests.length
+        ? `New prompt sent. The previous response is being interrupted.`
+        : `Prompt sent in ${thread.title}.`,
+  );
 
   try {
     const response = await fetch(links.chatCompletions, {
@@ -667,49 +1429,130 @@ async function sendLabRequest() {
     });
 
     if (!response.ok) {
-      throw new Error(await parseErrorPayload(response));
+      throw await parseErrorPayload(response);
     }
+    request.status = "running";
+    assistantMessage.status = "running";
+    assistantMessage.meta = requestBody.stream ? "streaming" : "running";
+    if (thread.latestRequestId === request.id) {
+      thread.inspector.status = requestBody.stream ? "streaming" : "running";
+      thread.inspector.latency = "running";
+      thread.inspector.latencyState = "running";
+    }
+    renderRequestUpdate(thread);
 
     let rawOutput = "";
     if (requestBody.stream) {
-      rawOutput = await consumeStream(response, assistantMessage);
+      rawOutput = await consumeStream(
+        response,
+        thread,
+        request,
+        assistantMessage,
+      );
     } else {
       const payload = await response.json();
+      if (payload?.error) {
+        throw new LabRequestError(
+          payload.error.message || "The proxy returned an error.",
+          payload.error.code ?? null,
+          response.status,
+        );
+      }
       assistantMessage.content = extractAssistantContent(payload) || "";
       rawOutput = JSON.stringify(payload, null, 2);
-      dom.labResponseModel.textContent = humanizeModel(payload?.model || model);
+      request.servedModel = payload?.model || model;
     }
 
     assistantMessage.meta = "assistant";
-    renderTranscript();
+    assistantMessage.status = "complete";
+    userMessage.meta = "sent";
+    userMessage.status = "complete";
+    request.status = "success";
 
     const elapsed = performance.now() - startedAt;
-    setStatusPill(dom.labStatusPill, "Success", "ok");
-    setStatusPill(dom.labLatencyBadge, formatDuration(elapsed), "ready");
-    dom.labResponseStatus.textContent = "success";
-    dom.labRawOutput.textContent = rawOutput || "No body returned.";
+    if (thread.latestRequestId === request.id) {
+      thread.inspector = {
+        status: "success",
+        model: request.servedModel,
+        conversationId,
+        latency: formatDuration(elapsed),
+        latencyState: "ready",
+        requestPreview: requestBody,
+        rawOutput: rawOutput || "No body returned.",
+      };
+    }
+    announce(`Response completed in ${formatDuration(elapsed)}.`);
   } catch (error) {
-    assistantMessage.role = "error";
-    assistantMessage.content = error instanceof Error ? error.message : String(error);
-    assistantMessage.meta = "error";
-    renderTranscript();
+    const message = error instanceof Error ? error.message : String(error);
+    const isManualStop =
+      controller.signal.aborted &&
+      controller.signal.reason === "user_stopped";
+    const isSuperseded =
+      error instanceof LabRequestError &&
+      error.code === "request_superseded";
+    const terminalStatus = isManualStop
+      ? "stopped"
+      : isSuperseded
+        ? "interrupted"
+        : "error";
+    request.status = terminalStatus;
+    userMessage.status = terminalStatus;
+    userMessage.meta = terminalStatus;
+    assistantMessage.status = terminalStatus;
+    assistantMessage.meta = terminalStatus;
+    if (terminalStatus === "error") {
+      assistantMessage.role = "error";
+      assistantMessage.content = message;
+    }
 
-    setStatusPill(dom.labStatusPill, "Error", "error");
-    setStatusPill(dom.labLatencyBadge, "failed", "error");
-    dom.labResponseStatus.textContent = "error";
-    dom.labRawOutput.textContent = assistantMessage.content;
+    if (thread.latestRequestId === request.id) {
+      thread.inspector = {
+        status: terminalStatus,
+        model: request.servedModel || model,
+        conversationId,
+        latency: terminalStatus === "error" ? "failed" : terminalStatus,
+        latencyState: terminalStatus === "error" ? "error" : "warn",
+        requestPreview: requestBody,
+        rawOutput:
+          terminalStatus === "interrupted"
+            ? `Interrupted by a newer message.${assistantMessage.content ? " Partial text remains in the transcript." : ""}`
+            : terminalStatus === "stopped"
+              ? `Stopped by the operator.${assistantMessage.content ? " Partial text remains in the transcript." : ""}`
+              : message,
+      };
+    }
+    announce(
+      terminalStatus === "interrupted"
+        ? "Previous response interrupted by the newer message."
+        : terminalStatus === "stopped"
+          ? "Current thread stopped."
+          : `Request failed: ${message}`,
+    );
   } finally {
-    state.lab.pendingMessageId = null;
-    state.lab.sending = false;
-    state.lab.controller = null;
-    updateLabControls();
+    request.controller = null;
+    thread.requests.delete(request.id);
+    renderRequestUpdate(thread);
   }
 }
 
 function stopLabRequest() {
-  if (state.lab.controller) {
-    state.lab.controller.abort();
-  }
+  const thread = getCurrentThread();
+  const active = getActiveRequests(thread);
+  if (!thread || !active.length) return;
+  active.forEach((request) => {
+    request.status = "stopping";
+    request.userMessage.status = "stopping";
+    request.userMessage.meta = "stopping";
+    request.assistantMessage.status = "stopping";
+    request.assistantMessage.meta = "stopping";
+    request.controller?.abort("user_stopped");
+  });
+  renderRequestUpdate(thread);
+  announce(
+    active.length === 1
+      ? "Stopping the current request."
+      : `Stopping ${active.length} requests in this thread.`,
+  );
 }
 
 function pushLiveLog(entry) {
@@ -735,12 +1578,21 @@ function connectStream() {
 
   source.addEventListener("snapshot", (event) => {
     state.connected = true;
-    const snapshot = JSON.parse(event.data);
-    applySnapshot(snapshot);
+    try {
+      const snapshot = JSON.parse(event.data);
+      applySnapshot(snapshot);
+    } catch {
+      state.connected = false;
+      setStatusPill(dom.stackMode, "Stale", "warn");
+    }
   });
 
   source.addEventListener("log", (event) => {
-    pushLiveLog(JSON.parse(event.data));
+    try {
+      pushLiveLog(JSON.parse(event.data));
+    } catch {
+      /* keep the live link open when one event is malformed */
+    }
   });
 
   source.addEventListener("error", () => {
@@ -750,9 +1602,38 @@ function connectStream() {
 }
 
 function installEvents() {
-  dom.labModelSelect.addEventListener("change", renderLabBadges);
-  dom.labModelInput.addEventListener("input", renderLabBadges);
-  dom.labConversationInput.addEventListener("input", renderLabBadges);
+  dom.labModelSelect.addEventListener("change", () => {
+    const thread = getCurrentThread();
+    if (thread) thread.model = dom.labModelSelect.value;
+    renderLabBadges();
+    renderModelHelp();
+  });
+  dom.labModelInput.addEventListener("input", () => {
+    const thread = getCurrentThread();
+    if (thread) thread.customModel = dom.labModelInput.value.trim();
+    renderLabBadges();
+    renderModelHelp();
+  });
+  dom.labConversationInput.addEventListener("input", () => {
+    const thread = getCurrentThread();
+    if (thread) {
+      thread.conversationId =
+        dom.labConversationInput.value.trim() || thread.conversationId;
+    }
+    renderLabBadges();
+    renderLabThreadList();
+  });
+  dom.labPolicySelect.addEventListener("change", () => {
+    const thread = getCurrentThread();
+    if (thread) {
+      thread.policy = dom.labPolicySelect.value === "queue"
+        ? "queue"
+        : "interrupt";
+    }
+    updateLabControls();
+  });
+  dom.labNewThreadButton.addEventListener("click", addNewThread);
+  dom.labBranchThreadButton.addEventListener("click", branchCurrentThread);
   dom.labSendButton.addEventListener("click", () => {
     void sendLabRequest();
   });
@@ -764,18 +1645,44 @@ function installEvents() {
       void sendLabRequest();
     }
   });
+  dom.labPromptInput.addEventListener("input", () => {
+    const thread = getCurrentThread();
+    if (thread) thread.draft = dom.labPromptInput.value;
+  });
+  dom.labThreadList.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    const tabs = Array.from(dom.labThreadList.querySelectorAll('[role="tab"]'));
+    const currentIndex = tabs.indexOf(document.activeElement);
+    if (currentIndex < 0 || !tabs.length) return;
+    event.preventDefault();
+    const delta = event.key === "ArrowRight" ? 1 : -1;
+    const next = tabs[(currentIndex + delta + tabs.length) % tabs.length];
+    const nextThreadId = next.getAttribute("data-thread-id");
+    switchThread(nextThreadId);
+    dom.labThreadList
+      .querySelector(`[data-thread-id="${CSS.escape(nextThreadId)}"]`)
+      ?.focus();
+  });
 }
 
 function bootstrap() {
   setLinks();
-  dom.labConversationInput.value = state.lab.conversationId;
-  updateLabControls();
   updateModelChoices([]);
-  applySnapshot(initialSnapshot);
-  resetLab();
+  const initialThread = createThread();
+  state.lab.currentThreadId = initialThread.id;
+  loadThreadControls(initialThread);
   installEvents();
+  applySnapshot(initialSnapshot);
+  renderLab();
   void fetchModels();
   connectStream();
+  const resumeConversationId = sessionStorage.getItem(
+    "claude-proxy:resume-conversation",
+  );
+  if (resumeConversationId) {
+    sessionStorage.removeItem("claude-proxy:resume-conversation");
+    void resumeStoredConversation(resumeConversationId);
+  }
 }
 
 bootstrap();

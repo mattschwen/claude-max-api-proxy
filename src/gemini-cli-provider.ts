@@ -8,9 +8,13 @@ import {
 } from "./config.js";
 import type {
   ExternalChatProvider,
+  ExternalModelDescriptor,
+  ExternalProviderAvailability,
+  ExternalProviderProbeOptions,
   PublicExternalProviderInfo,
 } from "./external-provider-types.js";
 import { stripModelProviderPrefix } from "./models.js";
+import { createEscalatedStop } from "./subprocess/stop-with-escalation.js";
 import type {
   OpenAIChatMessage,
   OpenAIChatRequest,
@@ -370,6 +374,8 @@ export function buildGeminiCliChatCompletion(
 }
 
 export class GeminiCliProvider implements ExternalChatProvider {
+  private availability: ExternalProviderAvailability;
+
   constructor(
     private readonly config: GeminiCliFallbackConfig | null =
       runtimeConfig.geminiCliFallback,
@@ -377,7 +383,21 @@ export class GeminiCliProvider implements ExternalChatProvider {
       now: Date.now,
       randomId: () => randomUUID().replace(/-/g, "").slice(0, 24),
     },
-  ) {}
+  ) {
+    this.availability = this.config
+      ? {
+          configured: true,
+          state: "unknown",
+          availableModels: [],
+          unavailableModels: [],
+        }
+      : {
+          configured: false,
+          state: "unconfigured",
+          availableModels: [],
+          unavailableModels: [],
+        };
+  }
 
   private getSupportedModels(): string[] {
     if (!this.config) {
@@ -390,6 +410,16 @@ export class GeminiCliProvider implements ExternalChatProvider {
     return new Map(
       this.getSupportedModels().map((model) => [normalizeRequestedModel(model), model]),
     );
+  }
+
+  private updateAvailability(
+    patch: Omit<ExternalProviderAvailability, "configured">,
+  ): ExternalProviderAvailability {
+    this.availability = {
+      configured: this.config !== null,
+      ...patch,
+    };
+    return this.getAvailability();
   }
 
   private ensureWorkdir(): void {
@@ -412,20 +442,17 @@ export class GeminiCliProvider implements ExternalChatProvider {
     ];
   }
 
-  private killChildProcess(process: ChildProcessWithoutNullStreams): void {
-    if (process.killed) {
-      return;
-    }
-
-    process.kill("SIGTERM");
-    const timer = setTimeout(() => {
-      if (!process.killed) {
-        process.kill("SIGKILL");
-      }
-    }, KILL_ESCALATION_MS);
-    if (typeof timer.unref === "function") {
-      timer.unref();
-    }
+  private killChildProcess(
+    process: ChildProcessWithoutNullStreams,
+    onForceRelease: () => void,
+  ): void {
+    const stopper = createEscalatedStop(
+      process,
+      onForceRelease,
+      KILL_ESCALATION_MS,
+      1000,
+    );
+    stopper.requestStop();
   }
 
   private runGeminiJsonCommand(
@@ -486,7 +513,7 @@ export class GeminiCliProvider implements ExternalChatProvider {
       if (signal) {
         const handleAbort = (): void => {
           stderr += "\nGemini CLI request aborted by signal.";
-          this.killChildProcess(child);
+          this.killChildProcess(child, () => finish(1));
         };
 
         if (signal.aborted) {
@@ -691,7 +718,12 @@ export class GeminiCliProvider implements ExternalChatProvider {
         if (signal) {
           const handleAbort = (): void => {
             if (child) {
-              this.killChildProcess(child);
+              this.killChildProcess(child, () =>
+                failStream(
+                  stdoutBuffer,
+                  `${stderrBuffer}\nGemini CLI request aborted by signal.`,
+                )
+              );
             }
           };
 
@@ -775,6 +807,85 @@ export class GeminiCliProvider implements ExternalChatProvider {
     }));
   }
 
+  getModelDescriptors(): ExternalModelDescriptor[] {
+    return this.getSupportedModels().map((model) => ({
+      id: model,
+      ownedBy: "gemini-cli",
+      timeoutMs: 180000,
+      capabilities: {
+        chatCompletions: true,
+        streaming: true,
+        reasoning: false,
+        tools: false,
+        vision: false,
+        structuredOutputs: false,
+      },
+    }));
+  }
+
+  getModelDescriptor(model: string | undefined): ExternalModelDescriptor | null {
+    if (!model) return null;
+    const resolved = this.resolveModel(model);
+    return this.getModelDescriptors().find((entry) => entry.id === resolved) ?? null;
+  }
+
+  getAvailability(): ExternalProviderAvailability {
+    return {
+      ...this.availability,
+      availableModels: [...this.availability.availableModels],
+      unavailableModels: [...this.availability.unavailableModels],
+    };
+  }
+
+  async probeAvailability(
+    options: ExternalProviderProbeOptions = {},
+  ): Promise<ExternalProviderAvailability> {
+    if (!this.config) return this.getAvailability();
+    const requested = options.model
+      ? this.resolveModel(options.model)
+      : undefined;
+    const models = requested ? [requested] : this.getSupportedModels();
+    if (options.model && !requested) {
+      return this.updateAvailability({
+        state: "unavailable",
+        checkedAt: this.deps.now(),
+        availableModels: [],
+        unavailableModels: [options.model],
+        error: `Gemini CLI model '${options.model}' is not configured`,
+      });
+    }
+
+    const results = await Promise.all(
+      models.map(async (model) => ({
+        model,
+        result: await this.runGeminiJsonCommand(
+          "Reply with exactly: OK",
+          model,
+          options.signal,
+        ),
+      })),
+    );
+    const availableModels = results
+      .filter((entry) => entry.result.exitCode === 0)
+      .map((entry) => entry.model);
+    const unavailableModels = results
+      .filter((entry) => entry.result.exitCode !== 0)
+      .map((entry) => entry.model);
+    const firstFailure = results.find((entry) => entry.result.exitCode !== 0);
+    return this.updateAvailability({
+      state: availableModels.length > 0 ? "available" : "unavailable",
+      checkedAt: this.deps.now(),
+      availableModels,
+      unavailableModels,
+      error: firstFailure
+        ? buildGeminiCliErrorResponse(
+            firstFailure.result.stdout,
+            firstFailure.result.stderr,
+          ).body.error.message
+        : undefined,
+    });
+  }
+
   async requestChatCompletion(
     body: Record<string, unknown>,
     model: string,
@@ -806,6 +917,14 @@ export class GeminiCliProvider implements ExternalChatProvider {
       options.signal,
     );
     if (result.exitCode !== 0) {
+      this.updateAvailability({
+        state: "unavailable",
+        checkedAt: this.deps.now(),
+        availableModels: [],
+        unavailableModels: [resolvedModel],
+        error: buildGeminiCliErrorResponse(result.stdout, result.stderr).body.error
+          .message,
+      });
       const failure = buildGeminiCliErrorResponse(result.stdout, result.stderr);
       return new Response(JSON.stringify(failure.body), {
         status: failure.status,
@@ -831,6 +950,12 @@ export class GeminiCliProvider implements ExternalChatProvider {
       this.deps.randomId(),
       this.deps.now(),
     );
+    this.updateAvailability({
+      state: "available",
+      checkedAt: this.deps.now(),
+      availableModels: [resolvedModel],
+      unavailableModels: [],
+    });
     return new Response(JSON.stringify(payload), {
       status: 200,
       headers: { "Content-Type": "application/json" },

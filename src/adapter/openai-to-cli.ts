@@ -12,9 +12,14 @@ export interface CliInput {
   sessionId?: string;
   systemPrompt?: string;
   isResume?: boolean;
+  /** Fork a resumed session so cancellation cannot mutate the committed head. */
+  forkSession?: boolean;
   thinkingBudget?: number;
   thinkingEffort?: ReasoningEffort;
   reasoningMode?: ReasoningMode;
+  /** Full committed-context prompt used if a resume must fall back to fresh. */
+  _freshPrompt?: string;
+  _freshSystemPrompt?: string;
   _conversationId?: string;
   _startTime?: number;
 }

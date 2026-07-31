@@ -9,8 +9,11 @@
 - [`GET /v1/agents`](#get-v1agents)
 - [`POST /v1/chat/completions`](#post-v1chatcompletions)
 - [`POST /v1/responses`](#post-v1responses)
+- [`DELETE /v1/requests/:requestId`](#delete-v1requestsrequestid)
 
-All endpoints return JSON. The proxy ignores `Authorization` headers — any string (or no header at all) is accepted.
+OpenAI-compatible inference endpoints do not require proxy authentication.
+Optional `/admin/*` routes are loopback/token protected. Keep the operational
+surfaces on a trusted network because they expose local runtime state.
 
 ---
 
@@ -49,15 +52,35 @@ curl http://127.0.0.1:3456/health
 
   "models": {
     "checkedAt": "2026-04-11T23:01:16.296Z",
-    "available": [
-      "claude-opus-<resolved-by-cli>",
+    "advertised": [
       "claude-sonnet-<resolved-by-cli>",
-      "claude-haiku-<resolved-by-cli>"
+      "local/qwen3"
     ],
+    "available": [
+      "claude-sonnet-<resolved-by-cli>",
+      "local/qwen3"
+    ],
+    "configured": ["openrouter/google/gemini-3-pro"],
     "unavailable": [
-      { "id": "opus", "code": "model_unavailable", "message": "..." }
+      {
+        "id": "opus",
+        "provider": "claude-cli",
+        "code": "model_unavailable",
+        "message": "..."
+      }
     ]
   },
+
+  "externalProviderAvailability": [
+    {
+      "provider": "local",
+      "availability": {
+        "state": "available",
+        "availableModels": ["local/qwen3"],
+        "unavailableModels": []
+      }
+    }
+  ],
 
   "pool": {
     "warmedAt": "2026-04-11T23:01:06.359Z",
@@ -101,9 +124,12 @@ curl http://127.0.0.1:3456/health
 
 | Field | Why it matters |
 | --- | --- |
-| `status` | `"ok"` means the server bound and is accepting traffic. Does **not** imply models are usable — check `models.available`. |
-| `auth.loggedIn` | `false` means the Claude CLI on this machine is not authenticated — chat requests will fail. |
-| `models.available` | If this array is empty, every chat request will fail with `no_models_available`. |
+| `status` | `"ok"` means the server bound and is accepting traffic. It does **not** imply every model is usable. |
+| `auth.loggedIn` | `false` means Claude routes are unavailable. Explicit external-provider routes can still work when Claude is optional. |
+| `models.advertised` | Model IDs currently returned by `/v1/models`. |
+| `models.available` | Models confirmed by the latest Claude or external-provider probe. |
+| `models.configured` | External models that are advertised but have not yet received a conclusive probe result. |
+| `models.unavailable` | Models with a conclusive failed probe, including provider and error details. |
 | `pool.isWarm` | `false` means the CLI warm-up loop has gone idle; the next request may pay extra CLI/auth startup latency. |
 | `queues` | Long per-conversation queues indicate a stuck request or a client spamming the same conversation key. |
 | `stallDetections` | If this increments, the subprocess output stream is going idle mid-response. See [TROUBLESHOOTING](./TROUBLESHOOTING.md). |
@@ -161,9 +187,11 @@ claude_proxy_process_resident_memory_bytes
 
 OpenAI-compatible. Returns the list of models the current Claude CLI account can
 actually use on this machine, plus any configured external provider models.
-Claude availability is computed by probing the stable Claude CLI family aliases
-(`sonnet`, `opus`, `fable`, `haiku`) and publishing the exact versioned IDs that the
-installed CLI resolves at runtime.
+Claude availability is computed by probing the account-tier `default` plus the
+Claude family selectors (`sonnet`, `opus`, `fable`, `haiku`) and publishing the
+exact versioned IDs that the installed CLI resolves at runtime. The request API also accepts `best`
+(Opus) and account-gated `sonnet[1m]` / `opus[1m]` selectors; extended-context
+selectors are passed through to Claude Code for the entitlement check.
 
 ### Example
 
@@ -206,14 +234,17 @@ curl http://127.0.0.1:3456/v1/models
 ```
 
 > [!NOTE]
-> An empty `data` array is a **real** signal, not a bug. It means your current `claude auth` session cannot access any of the model families the proxy probes. Re-run `claude auth status` and check `/health.models.unavailable` for the specific reason each family failed.
+> An empty `data` array is a **real** signal, not a bug. It means the current
+> Claude session exposes no probed model and no external model is configured.
+> Re-run `claude auth status` and check `/health.models.unavailable` for Claude
+> failures, or configure an explicit external provider.
 
 > [!NOTE]
 > If `GEMINI_CLI_ENABLED`, `GEMINI_CLI_MODEL`, `GEMINI_CLI_EXTRA_MODELS`,
 > `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `ZAI_API_KEY`, `BIGMODEL_API_KEY`, or the
-> explicit `OPENAI_COMPAT_FALLBACK_*` variables are configured, `/v1/models`
-> also advertises those external provider models. They are explicit opt-in
-> routes, not the implicit default.
+> explicit `OPENAI_COMPAT_FALLBACK_*` / `OPENAI_COMPAT_PROVIDERS_JSON`
+> variables are configured, `/v1/models` also advertises those external
+> provider models. They are explicit opt-in routes, not the implicit default.
 
 ---
 
@@ -247,6 +278,7 @@ curl http://127.0.0.1:3456/v1/capabilities
     "streamingResponses": false,
     "tools": false,
     "structuredOutputs": false,
+    "vision": false,
     "mcpServer": false
   },
   "agents": {
@@ -267,6 +299,49 @@ curl http://127.0.0.1:3456/v1/capabilities
     "adaptiveModels": ["claude-sonnet-4-7", "claude-opus-4-7"],
     "fixedBudgetModels": ["claude-haiku-4-5"]
   },
+  "models": {
+    "acceptedSelectors": [
+      "default",
+      "sonnet",
+      "opus",
+      "best",
+      "fable",
+      "haiku",
+      "sonnet[1m]",
+      "opus[1m]"
+    ],
+    "available": [
+      "claude-sonnet-4-7",
+      "openrouter/google/gemini-3-pro"
+    ],
+    "catalog": [
+      {
+        "id": "openrouter/google/gemini-3-pro",
+        "provider": "openrouter",
+        "transport": "openai-compatible",
+        "availability": "configured",
+        "timeoutMs": 180000,
+        "capabilities": {
+          "chatCompletions": true,
+          "streaming": true,
+          "reasoning": false,
+          "tools": false,
+          "vision": false,
+          "structuredOutputs": false
+        }
+      }
+    ]
+  },
+  "externalProviderAvailability": [
+    {
+      "provider": "openrouter",
+      "availability": {
+        "state": "unknown",
+        "availableModels": [],
+        "unavailableModels": []
+      }
+    }
+  ],
   "cli": {
     "version": "claude 2.1.112",
     "supportsXHighEffort": true,
@@ -283,8 +358,16 @@ curl http://127.0.0.1:3456/v1/capabilities
 
 Use this endpoint to decide whether to call `/v1/chat/completions` or `/v1/responses`, whether the current runtime can handle adaptive reasoning, and whether a higher-level MCP shim still needs to be added outside the proxy.
 
-When an external provider is configured, the payload also includes
-`externalProviders` plus the merged model list under `models.available`.
+When an external provider is configured, the payload also includes its
+credential-free configuration under `externalProviders`, live probe state
+under `externalProviderAvailability`, and one entry per model under
+`models.catalog`. The catalog's `availability` field is authoritative:
+`configured` means advertised but not conclusively probed, while `available`
+and `unavailable` are per-model probe results. `models.available` is the
+backward-compatible merged advertised list. `models.acceptedSelectors`
+describes the Claude request aliases the proxy understands; account-gated
+selectors can still be rejected by Claude Code. `lastFeatureScan` reports the
+most recent background scan when one has completed.
 
 ---
 
@@ -337,7 +420,9 @@ OpenAI-compatible chat completion endpoint. Supports streaming (`stream: true`) 
 
 The proxy accepts:
 
-- stable family aliases: `sonnet`, `opus`, `fable`, `haiku`
+- Claude selectors: `sonnet`, `opus`, `best`, `fable`, `haiku`
+- account-supported extended-context selectors: `sonnet[1m]`, `opus[1m]`,
+  and supported full Claude IDs ending in `[1m]`
 - exact versioned IDs returned by `GET /v1/models`
 - older/future versioned IDs for those families, which are mapped to the currently available family model on this machine
 - configured external provider models such as `gemini-2.5-pro`, `gemini-2.5-flash`, `glm-4.7-flash`, `glm-5`, or `glm-4.7`
@@ -405,10 +490,16 @@ When an external provider is configured:
 - if Claude has no accessible models, those Claude-default requests return a
   Claude error instead of silently switching providers
 - `/v1/responses` inherits the same behavior because it reuses this endpoint
+- stateless provider calls rebuild context from the committed transcript, while
+  overlap detection prevents duplication when a client resends prior messages
+- a successful external-provider turn clears the incompatible Claude session
+  checkpoint as part of the commit; failed or cancelled turns leave the last
+  committed checkpoint untouched
 
 The local Gemini CLI provider can advertise multiple model IDs via
-`GEMINI_CLI_EXTRA_MODELS`. API-key fallbacks still advertise one configured
-model at a time.
+`GEMINI_CLI_EXTRA_MODELS`. Legacy API-key fallback variables advertise one
+model; `OPENAI_COMPAT_PROVIDERS_JSON` can advertise any number of providers and
+models.
 
 ### Reasoning controls
 
@@ -446,14 +537,15 @@ Example using the standard `thinking` field:
 
 When any reasoning source is active, the proxy multiplies the family's hard timeout by 3× to allow for longer reasoning windows.
 
-### Conversation continuity — the `user` field
+### Conversation identity, continuity, and idempotency
 
-The OpenAI-standard `user` field is repurposed as a **conversation key**. Reuse the same `user` across multiple requests to have the proxy resume the same underlying Claude CLI session:
+Set `conversation_id` to give a thread a stable identity. Reusing it resumes
+the last successfully committed provider session:
 
 ```json
 {
   "model": "sonnet",
-  "user": "chat-abc-123",
+  "conversation_id": "chat-abc-123",
   "messages": [
     { "role": "user", "content": "Remember the number 17." }
   ]
@@ -463,20 +555,34 @@ The OpenAI-standard `user` field is repurposed as a **conversation key**. Reuse 
 ```json
 {
   "model": "sonnet",
-  "user": "chat-abc-123",
+  "conversation_id": "chat-abc-123",
   "messages": [
     { "role": "user", "content": "What number did I ask you to remember?" }
   ]
 }
 ```
 
-The proxy will resume the first call's CLI session so the second request has full context.
+The identity precedence is body `conversation_id`,
+`metadata.conversation_id`, `X-Conversation-Id`, legacy `user`, an opaque
+endpoint-scoped hash of `Idempotency-Key`, then a fresh request ID. Every
+accepted request returns `X-Request-Id` and `X-Conversation-Id` response
+headers.
 
-If `user` is omitted, the proxy treats each request as a fresh conversation.
+For safely retryable non-streaming calls, send `Idempotency-Key`. A completed
+retry returns the stored result; a duplicate that is queued or running returns
+`409 idempotency_key_in_use`. Reusing a key with different input or a different
+`previous_response_id` returns `409 idempotency_key_mismatch`.
 
 ### Same-conversation policy
 
-The default policy is `latest-wins`. If a second request arrives for the same `user` while the first is still in flight, the older request is canceled and any stale queued work for that conversation is dropped. Set `CLAUDE_PROXY_SAME_CONVERSATION_POLICY=queue` to get strict FIFO instead. See [CONFIGURATION](./CONFIGURATION.md#same-conversation-policy).
+The default policy is `latest-wins`. If a second request arrives for the same
+conversation while the first is still in flight, the older request is canceled
+and any stale queued work for that conversation is dropped. Set
+`CLAUDE_PROXY_SAME_CONVERSATION_POLICY=queue` for FIFO after validation and
+scheduler admission, or override a single call with
+`"conversation_policy": "interrupt" | "queue"` or `X-Conversation-Policy`.
+Independent conversation IDs can run concurrently.
+See [CONFIGURATION](./CONFIGURATION.md#same-conversation-policy).
 
 ### Error responses
 
@@ -500,6 +606,11 @@ Common `error.code` values:
 | `no_models_available` | Proxy's startup probes all failed. Check `claude auth status`. |
 | `auth_required` | Claude CLI is not authenticated. Run `claude auth login`. |
 | `rate_limited` | Claude returned a rate-limit / budget error. Back off and retry. |
+| `queue_full` | This conversation already has the maximum number of queued turns. |
+| `queue_wait_timeout` | The request expired while waiting to start. |
+| `request_superseded` | A newer same-conversation request interrupted this one. |
+| `request_cancelled` | The caller canceled the request or disconnected. |
+| `idempotency_key_in_use` | That idempotency key already identifies non-terminal work. |
 | `claude_cli_error` | Generic CLI failure — check `/health.recentErrors`. |
 | `invalid_request` | Anthropic returned `invalid_request`. See the `message` for the specific reason. |
 
@@ -557,9 +668,12 @@ curl http://127.0.0.1:3456/v1/responses \
 
 ### Conversation continuity
 
-The proxy keeps a short-lived mapping from each returned response ID to the
-underlying conversation key. Reuse `previous_response_id` on later calls to
-continue the same Claude CLI session without manually supplying `user`.
+The proxy persists each returned response ID as a durable, branchable
+checkpoint. Reuse `previous_response_id` to continue it after a restart. By
+default, each child gets a new conversation/session head, so two children of
+the same response can run concurrently without canceling or contaminating each
+other. Supply an explicit `conversation_id` when you intentionally want a
+single shared thread instead.
 
 ### Notes
 
@@ -567,3 +681,26 @@ continue the same Claude CLI session without manually supplying `user`.
 - `input` accepts plain strings, text items, or message-shaped items with `role` and `content`.
 - `agent` accepts a built-in agent id such as `expert-coder`, or you can use the scoped `/v1/agents/:agentId/responses` route.
 - Reasoning controls (`thinking`, `reasoning`, `reasoning_effort`, `output_config.effort`) are passed through the same normalization logic used by `/v1/chat/completions`.
+
+---
+
+## `DELETE /v1/requests/:requestId`
+
+Cancel an active or queued request using the `X-Request-Id` returned when it was
+accepted:
+
+```bash
+curl -X DELETE http://127.0.0.1:3456/v1/requests/REQUEST_ID
+```
+
+A found request returns `202` with `status: "cancelling"`. Unknown or already
+terminal IDs return `404 request_not_found`. Cancellation never commits partial
+assistant output or advances the resumable provider session.
+
+Request IDs are unguessable cancellation capabilities. `/health` deliberately
+redacts queued request IDs; the richer Ops snapshot is intended for trusted
+local operators.
+
+When `CLAUDE_PROXY_ENABLE_ADMIN_API=true`, authenticated administrators can also
+force a feature rescan with `POST /admin/features/refresh` and reset a provider
+session with `POST /admin/conversations/:conversationId/reset`.

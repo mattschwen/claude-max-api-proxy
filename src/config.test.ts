@@ -8,6 +8,7 @@ import {
   ZAI_CODING_OPENAI_BASE_URL,
   ZAI_OPENAI_BASE_URL,
   parseExternalFallbackConfig,
+  parseExternalProviderConfigs,
   parseGeminiCliFallbackConfig,
   parseSameConversationPolicy,
   readRuntimeConfig,
@@ -30,6 +31,7 @@ test("readRuntimeConfig parses booleans", () => {
   }, undefined);
 
   assert.deepEqual(config, {
+    requireClaude: true,
     sameConversationPolicy: "queue",
     debugQueues: true,
     enableAdminApi: true,
@@ -40,6 +42,7 @@ test("readRuntimeConfig parses booleans", () => {
     modelFallbacks: [],
     geminiCliFallback: null,
     externalFallback: null,
+    externalProviders: [],
   });
   assert.ok(config.maxConcurrentRequests >= 1);
 });
@@ -50,6 +53,7 @@ test("readRuntimeConfig reads default thinking budget", () => {
   }, undefined);
 
   assert.deepEqual(config, {
+    requireClaude: true,
     sameConversationPolicy: "latest-wins",
     debugQueues: false,
     enableAdminApi: false,
@@ -60,6 +64,7 @@ test("readRuntimeConfig reads default thinking budget", () => {
     modelFallbacks: [],
     geminiCliFallback: null,
     externalFallback: null,
+    externalProviders: [],
   });
   assert.ok(config.maxConcurrentRequests >= 1);
 });
@@ -73,6 +78,7 @@ test("readRuntimeConfig prefers persisted thinking budget over env", () => {
   );
 
   assert.deepEqual(config, {
+    requireClaude: true,
     sameConversationPolicy: "latest-wins",
     debugQueues: false,
     enableAdminApi: false,
@@ -83,6 +89,7 @@ test("readRuntimeConfig prefers persisted thinking budget over env", () => {
     modelFallbacks: [],
     geminiCliFallback: null,
     externalFallback: null,
+    externalProviders: [],
   });
   assert.ok(config.maxConcurrentRequests >= 1);
 });
@@ -96,6 +103,7 @@ test("readRuntimeConfig reads default expert agent", () => {
   );
 
   assert.deepEqual(config, {
+    requireClaude: true,
     sameConversationPolicy: "latest-wins",
     debugQueues: false,
     enableAdminApi: false,
@@ -106,6 +114,7 @@ test("readRuntimeConfig reads default expert agent", () => {
     modelFallbacks: [],
     geminiCliFallback: null,
     externalFallback: null,
+    externalProviders: [],
   });
   assert.ok(config.maxConcurrentRequests >= 1);
 });
@@ -294,4 +303,163 @@ test("readRuntimeConfig lets explicit fallback model override inferred ZAI defau
     model: "glm-4.7",
     streamMode: "synthetic",
   });
+  assert.equal(config.requireClaude, false);
+  assert.equal(config.externalProviders.length, 1);
+});
+
+test("parseExternalProviderConfigs supports multiple named providers and models", () => {
+  const providers = parseExternalProviderConfigs({
+    OPENAI_COMPAT_PROVIDERS_JSON: JSON.stringify([
+      {
+        provider: "local",
+        baseUrl: "http://127.0.0.1:11434/v1",
+        models: [
+          {
+            id: "local/qwen3",
+            upstreamId: "qwen3",
+            timeoutMs: 420000,
+            capabilities: {
+              reasoning: true,
+              tools: true,
+              contextWindow: 131072,
+            },
+          },
+          "local/deepseek-r1",
+        ],
+      },
+      {
+        provider: "openrouter",
+        baseUrl: "https://openrouter.ai/api/v1",
+        apiKeyEnv: "OPENROUTER_API_KEY",
+        models: ["openrouter/google/gemini-3-pro"],
+        streamMode: "passthrough",
+      },
+    ]),
+    OPENROUTER_API_KEY: "router-secret",
+  });
+
+  assert.equal(providers.length, 2);
+  assert.deepEqual(
+    providers[0].models?.map((model) => model.id),
+    ["local/qwen3", "local/deepseek-r1"],
+  );
+  assert.equal(providers[0].models?.[0].timeoutMs, 420000);
+  assert.equal(providers[0].models?.[0].upstreamId, "qwen3");
+  assert.equal(providers[0].models?.[0].capabilities.reasoning, true);
+  assert.equal(providers[0].models?.[0].capabilities.tools, true);
+  assert.equal(providers[0].models?.[0].capabilities.contextWindow, 131072);
+  assert.equal(providers[1].apiKey, "router-secret");
+  assert.equal(providers[1].streamMode, "passthrough");
+});
+
+test("parseExternalProviderConfigs rejects bare Claude route collisions", () => {
+  assert.throws(
+    () =>
+      parseExternalProviderConfigs({
+        OPENAI_COMPAT_PROVIDERS_JSON: JSON.stringify({
+          provider: "unsafe",
+          baseUrl: "https://example.com/v1",
+          models: ["sonnet"],
+        }),
+      }),
+    /collides with a Claude alias/i,
+  );
+});
+
+test("parseExternalProviderConfigs rejects unsafe provider base URLs", () => {
+  assert.throws(
+    () =>
+      parseExternalProviderConfigs({
+        OPENAI_COMPAT_PROVIDERS_JSON: JSON.stringify({
+          provider: "malformed",
+          baseUrl: "not-a-url-with-secret-token",
+          models: ["malformed/model"],
+        }),
+      }),
+    (error: unknown) =>
+      error instanceof Error &&
+      /invalid baseUrl/i.test(error.message) &&
+      !error.message.includes("secret-token"),
+  );
+  assert.throws(
+    () =>
+      parseExternalProviderConfigs({
+        OPENAI_COMPAT_PROVIDERS_JSON: JSON.stringify({
+          provider: "credentialed",
+          baseUrl: "https://user:secret@example.com/v1",
+          models: ["credentialed/model"],
+        }),
+      }),
+    /must not contain credentials/i,
+  );
+  assert.throws(
+    () =>
+      parseExternalProviderConfigs({
+        OPENAI_COMPAT_PROVIDERS_JSON: JSON.stringify({
+          provider: "unsupported-scheme",
+          baseUrl: "file:///tmp/provider",
+          models: ["unsupported/model"],
+        }),
+      }),
+    /must use http or https/i,
+  );
+  assert.throws(
+    () =>
+      parseExternalFallbackConfig({
+        OPENAI_COMPAT_FALLBACK_PROVIDER: "legacy",
+        OPENAI_COMPAT_FALLBACK_BASE_URL:
+          "https://user:secret@example.com/v1",
+        OPENAI_COMPAT_FALLBACK_API_KEY: "key",
+        OPENAI_COMPAT_FALLBACK_MODEL: "legacy/model",
+      }),
+    /must not contain credentials/i,
+  );
+});
+
+test("parseExternalProviderConfigs fails when an explicit apiKeyEnv is unset", () => {
+  assert.throws(
+    () =>
+      parseExternalProviderConfigs({
+        OPENAI_COMPAT_PROVIDERS_JSON: JSON.stringify({
+          provider: "remote",
+          baseUrl: "https://example.com/v1",
+          apiKeyEnv: "MISSING_REMOTE_API_KEY",
+          models: ["remote/model"],
+        }),
+      }),
+    /unset apiKeyEnv 'MISSING_REMOTE_API_KEY'/i,
+  );
+});
+
+test("OPENAI_COMPAT_PROVIDERS_JSON replaces legacy external fallback state", () => {
+  const config = readRuntimeConfig(
+    {
+      GEMINI_API_KEY: "legacy-key",
+      OPENAI_COMPAT_PROVIDERS_JSON: JSON.stringify({
+        provider: "local",
+        baseUrl: "http://127.0.0.1:11434/v1",
+        models: ["local/qwen3"],
+      }),
+    },
+    undefined,
+  );
+
+  assert.equal(config.externalFallback, null);
+  assert.deepEqual(
+    config.externalProviders.map((provider) => provider.provider),
+    ["local"],
+  );
+});
+
+test("readRuntimeConfig can explicitly require Claude with external providers", () => {
+  const config = readRuntimeConfig(
+    {
+      GEMINI_API_KEY: "gemini-key",
+      CLAUDE_PROXY_REQUIRE_CLAUDE: "true",
+    },
+    undefined,
+  );
+
+  assert.equal(config.requireClaude, true);
+  assert.equal(config.externalProviders.length, 1);
 });

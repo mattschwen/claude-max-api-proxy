@@ -7,8 +7,10 @@ import {
   parseFallbackProviderError,
 } from "../fallback-provider.js";
 import type { ExternalChatProvider } from "../external-provider-types.js";
+import type { SameConversationPolicy } from "../config.js";
 import { log, logError } from "../logger.js";
 import { getModelTimeout, stripModelProviderPrefix } from "../models.js";
+import { sessionManager } from "../session/manager.js";
 import { conversationStore } from "../store/conversation.js";
 import type { OpenAIChatRequest } from "../types/openai.js";
 import {
@@ -17,10 +19,53 @@ import {
 } from "./chat-execution.js";
 import {
   conversationRequestQueue,
+  MAX_QUEUE_DEPTH,
+  QueueFullError,
   RequestCancelledError,
 } from "./request-queue.js";
+import {
+  beginDurableTurn,
+  readLastUserText,
+} from "./turn-admission.js";
+import { mergeCommittedConversationMessages } from "./conversation-replay.js";
 
 const SYNTHETIC_STREAM_KEEPALIVE_INTERVAL = 5000;
+
+function finishStoredExternalTurn(
+  requestId: string,
+  status:
+    | "completed"
+    | "superseded"
+    | "cancelled"
+    | "failed"
+    | "timed_out",
+  options: {
+    output?: string;
+    reason?: string;
+    model?: string;
+    persistMessages?: boolean;
+  } = {},
+): void {
+  try {
+    const turn = conversationStore.getTurn(requestId);
+    if (!turn) return;
+    const completed = conversationStore.finishTurn(requestId, status, {
+      ...options,
+      clearSession: status === "completed",
+      persistInputMessage: options.persistMessages,
+      persistAssistantMessage: options.persistMessages,
+    });
+    // External providers cannot continue a Claude CLI transcript. Once an
+    // external turn commits, retire that checkpoint so a later Claude turn
+    // rebuilds context from the successful stored messages instead of resuming
+    // before the provider switch.
+    if (completed && status === "completed") {
+      sessionManager.delete(turn.conversation_id);
+    }
+  } catch (error) {
+    console.error("[External Chat] Turn state error:", error);
+  }
+}
 
 class CleanupSet {
   private fns = new Set<() => void>();
@@ -44,33 +89,6 @@ class CleanupSet {
     }
     this.fns.clear();
   }
-}
-
-function readLastUserMessage(
-  messages: OpenAIChatRequest["messages"],
-): string | null {
-  const lastUserMessage = [...messages].reverse().find((message) =>
-    message.role === "user"
-  );
-  if (!lastUserMessage) {
-    return null;
-  }
-
-  if (typeof lastUserMessage.content === "string") {
-    return lastUserMessage.content;
-  }
-
-  return lastUserMessage.content
-    .map((part) => {
-      if (typeof part === "string") {
-        return part;
-      }
-      if (part && typeof part === "object" && typeof part.text === "string") {
-        return part.text;
-      }
-      return "";
-    })
-    .join("");
 }
 
 function startExternalStreamingResponse(res: Response, requestId: string): void {
@@ -314,6 +332,7 @@ async function executeExternalChat(params: {
   stream: boolean;
   resolvedModel: string;
   startTime: number;
+  timeoutMs: number;
   registerCancel?: (cancel: (error: ClaudeProxyError) => void) => void;
 }): Promise<void> {
   const {
@@ -325,6 +344,7 @@ async function executeExternalChat(params: {
     stream,
     resolvedModel,
     startTime,
+    timeoutMs,
     registerCancel,
   } = params;
   const providerInfo = provider.getPublicInfo();
@@ -362,6 +382,11 @@ async function executeExternalChat(params: {
       respondWithError(res, error, stream, requestId);
     }
     abortController.abort(error.message);
+    finishStoredExternalTurn(
+      requestId,
+      error.code === "request_superseded" ? "superseded" : "cancelled",
+      { reason: error.message, model: resolvedModel },
+    );
     finish();
   });
 
@@ -375,17 +400,48 @@ async function executeExternalChat(params: {
       upstreamProvider: providerInfo.provider,
     });
     abortController.abort("client_disconnected");
-    if (assistantText) {
-      conversationStore.addMessage(
-        conversationId,
-        "assistant",
-        `${assistantText}\n\n[Response truncated — client disconnected]`,
-      );
-    }
+    finishStoredExternalTurn(requestId, "cancelled", {
+      reason: "client_disconnected",
+      model: resolvedModel,
+    });
     finish();
   };
   res.on("close", onClose);
   cleanup.add(() => res.removeListener("close", onClose));
+  const timeoutId = setTimeout(() => {
+    if (completed) return;
+    const message = `External provider request timed out after ${
+      Math.ceil(timeoutMs / 1000)
+    }s`;
+    abortController.abort("provider_timeout");
+    recordError({
+      conversationId,
+      requestId,
+      model: resolvedModel,
+      provider: providerInfo.provider,
+      startTime,
+      error: message,
+    });
+    finishStoredExternalTurn(requestId, "timed_out", {
+      reason: message,
+      model: resolvedModel,
+    });
+    if (!res.writableEnded) {
+      respondWithError(
+        res,
+        {
+          status: 504,
+          type: "timeout_error",
+          code: "external_provider_timeout",
+          message,
+        },
+        stream,
+        requestId,
+      );
+    }
+    finish();
+  }, timeoutMs);
+  cleanup.add(() => clearTimeout(timeoutId));
 
   try {
     const useUpstreamStreaming = stream && !provider.usesSyntheticStreaming();
@@ -416,6 +472,10 @@ async function executeExternalChat(params: {
         provider: providerInfo.provider,
         startTime,
         error: upstreamError.message,
+      });
+      finishStoredExternalTurn(requestId, "failed", {
+        reason: upstreamError.message,
+        model: resolvedModel,
       });
       respondWithError(res, upstreamError, stream, requestId);
       finish();
@@ -504,8 +564,11 @@ async function executeExternalChat(params: {
           startTime,
           error: streamErrorMessage,
         });
+        finishStoredExternalTurn(requestId, "failed", {
+          reason: streamErrorMessage,
+          model: resolvedModel,
+        });
       } else if (assistantText) {
-        conversationStore.addMessage(conversationId, "assistant", assistantText);
         recordCompletion({
           conversationId,
           requestId,
@@ -513,6 +576,11 @@ async function executeExternalChat(params: {
           provider: providerInfo.provider,
           startTime,
           responseLength: assistantText.length,
+        });
+        finishStoredExternalTurn(requestId, "completed", {
+          output: assistantText,
+          model: resolvedModel,
+          persistMessages: true,
         });
       } else {
         recordCompletion({
@@ -522,6 +590,11 @@ async function executeExternalChat(params: {
           provider: providerInfo.provider,
           startTime,
           responseLength: 0,
+        });
+        finishStoredExternalTurn(requestId, "completed", {
+          output: "",
+          model: resolvedModel,
+          persistMessages: true,
         });
       }
       if (!res.writableEnded) {
@@ -540,9 +613,6 @@ async function executeExternalChat(params: {
       ? payload
       : extractAssistantContentFromChatPayload(payload);
     const usage = readUsageTotals(payload);
-    if (finalText) {
-      conversationStore.addMessage(conversationId, "assistant", finalText);
-    }
     recordCompletion({
       conversationId,
       requestId,
@@ -550,6 +620,11 @@ async function executeExternalChat(params: {
       provider: providerInfo.provider,
       startTime,
       responseLength: finalText.length,
+    });
+    finishStoredExternalTurn(requestId, "completed", {
+      output: finalText,
+      model: resolvedModel,
+      persistMessages: true,
     });
 
     if (stream) {
@@ -590,6 +665,10 @@ async function executeExternalChat(params: {
       success: false,
       error: message,
     });
+    finishStoredExternalTurn(requestId, "failed", {
+      reason: message,
+      model: resolvedModel,
+    });
     if (!res.writableEnded) {
       if (stream) {
         respondWithError(res, {
@@ -623,6 +702,10 @@ export async function handleExternalChatCompletions(params: {
   queueDepth: number;
   startTime: number;
   resolvedModel: string;
+  sequence: number;
+  policy: SameConversationPolicy;
+  signal: AbortSignal;
+  idempotencyKey?: string;
 }): Promise<void> {
   const {
     provider,
@@ -636,14 +719,39 @@ export async function handleExternalChatCompletions(params: {
     queueDepth,
     startTime,
     resolvedModel,
+    sequence,
+    policy,
+    signal,
+    idempotencyKey,
   } = params;
   const providerInfo = provider.getPublicInfo();
+  const timeoutMs =
+    provider.getModelDescriptor(resolvedModel)?.timeoutMs ??
+    getModelTimeout(resolvedModel);
   const normalizedRequestedModel = requestedModel
     ? stripModelProviderPrefix(requestedModel)
     : undefined;
   const fallbackUsed = Boolean(
     normalizedRequestedModel && normalizedRequestedModel !== resolvedModel,
   );
+  if (
+    !beginDurableTurn({
+      res,
+      requestId,
+      conversationId,
+      parentResponseId:
+        typeof body.metadata?.previous_response_id === "string"
+          ? body.metadata.previous_response_id
+          : undefined,
+      model: resolvedModel,
+      provider: providerInfo?.provider ?? "external",
+      input: readLastUserText(body.messages),
+      idempotencyKey,
+      stream,
+    })
+  ) {
+    return;
+  }
 
   log("request.start", {
     requestId,
@@ -658,10 +766,11 @@ export async function handleExternalChatCompletions(params: {
   });
 
   try {
-    await conversationRequestQueue.enqueue(
+    await conversationRequestQueue.submit(
       conversationId,
       requestId,
       async () => {
+        conversationStore.markTurnRunning(requestId);
         const activeRequest = conversationRequestQueue.registerActiveRequest(
           conversationId,
           requestId,
@@ -669,34 +778,89 @@ export async function handleExternalChatCompletions(params: {
         );
         try {
           conversationStore.ensureConversation(conversationId, resolvedModel);
-          const lastUserMessage = readLastUserMessage(body.messages);
-          if (lastUserMessage) {
-            conversationStore.addMessage(conversationId, "user", lastUserMessage);
-          }
+          const requestWithCommittedHistory =
+            mergeCommittedConversationMessages(
+              body,
+              conversationStore.getMessages(conversationId),
+            );
           await executeExternalChat({
             provider,
             res,
-            body,
+            body: requestWithCommittedHistory,
             requestId,
             conversationId,
             stream,
             resolvedModel,
             startTime,
+            timeoutMs,
             registerCancel: activeRequest.setCancel,
           });
         } finally {
           activeRequest.clear();
         }
       },
-      getModelTimeout(resolvedModel),
+      {
+        hardTimeoutMs: timeoutMs,
+        sequence,
+        policy,
+        signal,
+        maxQueueDepth: MAX_QUEUE_DEPTH,
+      },
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     logError("request.error", error, { requestId, conversationId });
     if (error instanceof RequestCancelledError) {
+      finishStoredExternalTurn(
+        requestId,
+        error.proxyError.code === "request_superseded"
+          ? "superseded"
+          : "cancelled",
+        { reason: error.proxyError.message, model: resolvedModel },
+      );
       respondWithError(res, error.proxyError, stream, requestId);
       return;
     }
+    if (error instanceof QueueFullError) {
+      conversationRequestQueue.logBlockedRequest(
+        conversationId,
+        requestId,
+        error.depth,
+      );
+      finishStoredExternalTurn(requestId, "failed", {
+        reason: error.message,
+        model: resolvedModel,
+      });
+      if (!res.headersSent) {
+        res.status(429).json({
+          error: {
+            message: `${error.message} Please wait for current requests to complete.`,
+            type: "rate_limit_error",
+            code: error.code,
+          },
+        });
+      }
+      return;
+    }
+    if (/^Queue timeout after /.test(message)) {
+      finishStoredExternalTurn(requestId, "timed_out", {
+        reason: message,
+        model: resolvedModel,
+      });
+      if (!res.headersSent) {
+        sendJsonError(res, {
+          status: 504,
+          message,
+          type: "timeout_error",
+          code: "queue_wait_timeout",
+        });
+      }
+      return;
+    }
+    finishStoredExternalTurn(requestId, "failed", {
+      reason: message,
+      model: resolvedModel,
+    });
     if (!res.headersSent) {
       sendJsonError(res, {
         status: 500,

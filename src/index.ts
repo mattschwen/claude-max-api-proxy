@@ -8,43 +8,13 @@
 import { startServer, stopServer, getServer } from "./server/index.js";
 import { verifyClaude, verifyAuth } from "./subprocess/manager.js";
 import { modelAvailability } from "./model-availability.js";
-import type { ModelDefinition } from "./models.js";
 import { runtimeConfig } from "./config.js";
+import { buildHostModelDefinition } from "./host-model-definition.js";
 
 const PROVIDER_ID = "claude-code-cli";
 const PROVIDER_LABEL = "Claude Max API Proxy";
 const LEGACY_PLUGIN_ID = "claude-code-cli-provider";
 const DEFAULT_PORT = 3456;
-interface ModelDef {
-  id: string;
-  name: string;
-  api: string;
-  reasoning: boolean;
-  input: string[];
-  cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
-  contextWindow: number;
-  maxTokens: number;
-}
-
-function getModelName(model: ModelDefinition): string {
-  if (model.family === "opus") return "Claude Opus";
-  if (model.family === "haiku") return "Claude Haiku";
-  if (model.family === "fable") return "Claude Fable";
-  return "Claude Sonnet";
-}
-
-function buildModelDefinition(model: ModelDefinition): ModelDef {
-  return {
-    id: model.id,
-    name: getModelName(model),
-    api: "openai-completions",
-    reasoning: model.family === "opus" || model.family === "fable",
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 200000,
-    maxTokens: 8192,
-  };
-}
 
 function emptyPluginConfigSchema(): { type: "object"; properties: Record<string, never>; additionalProperties: boolean } {
   return {
@@ -128,7 +98,9 @@ const claudeCodeCliPlugin = {
               spin.stop("Claude Max API Proxy ready");
 
               const baseUrl = `http://127.0.0.1:${serverPort}/v1`;
-              const availableModels = availability.available.map(buildModelDefinition);
+              const availableModels = availability.available.map(
+                buildHostModelDefinition,
+              );
               const defaultModel = `${PROVIDER_ID}/${availability.available[0].id}`;
               return {
                 profiles: [

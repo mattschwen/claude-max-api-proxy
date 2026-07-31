@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   chatToResponsesResponse,
+  responsesInputHasText,
   responsesToChatRequest,
 } from "./responses.js";
 
@@ -67,4 +68,38 @@ test("chatToResponsesResponse wraps chat completions in a minimal responses payl
     output_tokens: 3,
     total_tokens: 8,
   });
+});
+
+test("responsesToChatRequest replays persisted history for stateless providers", () => {
+  const request = responsesToChatRequest(
+    {
+      model: "external/example",
+      input: "What did I ask?",
+      previous_response_id: "resp_1",
+    },
+    "conv-1",
+    [
+      { role: "user", content: "Remember the number 42." },
+      { role: "assistant", content: "I will remember 42." },
+    ],
+  );
+
+  assert.deepEqual(request.messages, [
+    { role: "user", content: "Remember the number 42." },
+    { role: "assistant", content: "I will remember 42." },
+    { role: "user", content: "What did I ask?" },
+  ]);
+});
+
+test("responsesInputHasText validates only the new Responses input", () => {
+  assert.equal(responsesInputHasText(undefined), false);
+  assert.equal(responsesInputHasText("   "), false);
+  assert.equal(
+    responsesInputHasText([{ type: "input_text", text: "" }]),
+    false,
+  );
+  assert.equal(
+    responsesInputHasText([{ role: "user", content: "follow up" }]),
+    true,
+  );
 });

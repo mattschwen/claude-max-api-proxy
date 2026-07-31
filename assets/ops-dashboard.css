@@ -89,6 +89,10 @@ select {
   font: inherit;
 }
 
+button {
+  color: inherit;
+}
+
 .ops-shell {
   position: relative;
   z-index: 1;
@@ -248,7 +252,37 @@ h3 {
   transform: translateY(-1px);
   border-color: rgba(255, 79, 168, 0.34);
   box-shadow: 0 16px 32px rgba(6, 8, 22, 0.34);
-  outline: none;
+  outline: 3px solid color-mix(in oklab, var(--ops-cyan) 74%, white 26%);
+  outline-offset: 2px;
+}
+
+.offline-banner {
+  position: sticky;
+  top: 6px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 11px 14px;
+  border: 1px solid rgba(255, 214, 107, 0.34);
+  border-radius: var(--ops-radius-sm);
+  background: rgba(35, 27, 14, 0.97);
+  box-shadow: var(--ops-shadow);
+}
+
+.offline-banner[hidden] {
+  display: none;
+}
+
+.offline-banner > div {
+  display: grid;
+  gap: 2px;
+}
+
+.offline-banner span {
+  color: var(--ops-muted);
+  font-size: 12px;
 }
 
 .shell-link span {
@@ -718,6 +752,25 @@ body[data-connected="true"] .status-dot {
 .lane-row {
   display: grid;
   gap: 6px;
+  width: 100%;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    transform var(--motion-quick),
+    border-color var(--motion-quick),
+    background var(--motion-quick);
+}
+
+.lane-row:hover {
+  transform: translateY(-1px);
+  border-color: var(--ops-border-strong);
+}
+
+.lane-row:focus-visible {
+  border-color: rgba(47, 230, 255, 0.68);
+  outline: 3px solid rgba(47, 230, 255, 0.28);
+  outline-offset: 2px;
 }
 
 .lane-top,
@@ -883,6 +936,9 @@ body[data-connected="true"] .status-dot {
 .conversation-row {
   display: grid;
   gap: 7px;
+  width: 100%;
+  color: inherit;
+  text-align: left;
   cursor: pointer;
   transition:
     border-color var(--motion-quick),
@@ -893,8 +949,12 @@ body[data-connected="true"] .status-dot {
 .conversation-row:hover,
 .conversation-row:focus-visible {
   border-color: var(--ops-border-strong);
-  outline: none;
   transform: translateY(-1px);
+}
+
+.conversation-row:focus-visible {
+  outline: 3px solid rgba(47, 230, 255, 0.3);
+  outline-offset: 2px;
 }
 
 .conversation-row.is-selected {
@@ -994,13 +1054,21 @@ body[data-connected="true"] .status-dot {
 }
 
 .toolbar-button {
-  min-height: 32px;
+  min-height: 44px;
   padding: 0 12px;
   cursor: pointer;
   transition:
     background var(--motion-quick),
     border-color var(--motion-quick),
     color var(--motion-quick);
+}
+
+.toolbar-button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  border-color: rgba(47, 230, 255, 0.68);
+  outline: 3px solid rgba(47, 230, 255, 0.28);
+  outline-offset: 2px;
 }
 
 .toolbar-button.is-active {
@@ -1019,7 +1087,7 @@ body[data-connected="true"] .status-dot {
 
 input,
 select {
-  min-height: 34px;
+  min-height: 44px;
   padding: 0 10px;
   border: 1px solid var(--ops-border);
   border-radius: 10px;
@@ -1088,6 +1156,18 @@ input::placeholder {
   color: var(--ops-muted);
   font-size: 12px;
   text-align: center;
+}
+
+.empty-inline[data-state="loading"] {
+  border-color: rgba(47, 230, 255, 0.22);
+}
+
+.empty-inline[data-state="error"] {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  border-color: rgba(255, 122, 109, 0.3);
+  color: color-mix(in oklab, var(--ops-alarm) 64%, white 36%);
 }
 
 .mono {
@@ -1207,6 +1287,11 @@ input::placeholder {
 
   .log-controls {
     grid-template-columns: 1fr;
+  }
+
+  .offline-banner {
+    align-items: stretch;
+    flex-direction: column;
   }
 }
 

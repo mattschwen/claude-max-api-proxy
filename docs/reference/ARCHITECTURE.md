@@ -54,8 +54,11 @@ This doc explains what happens inside the proxy when a request comes in. It is i
 ```
 
 Configured external providers such as Gemini CLI or Z.AI are explicit side
-routes. They are advertised on `/v1/models`, but they are not the implicit
-default when a request omits `model` or asks for Claude.
+routes. Multiple providers and models can coexist behind the registry. They are
+advertised on `/v1/models`, while `/v1/capabilities` exposes provider probe
+state and model-specific reasoning, tools, vision, structured-output, context,
+and timeout metadata. They never become the implicit default when a request
+asks for Claude.
 
 ## Module layout (`src/`)
 
@@ -67,6 +70,8 @@ src/
 │   └── cli-to-openai.ts     subprocess stream → OpenAI chunks
 ├── server/               HTTP surface
 │   ├── routes.ts            Request validation, model resolution, health/admin routes
+│   ├── request-context.ts   Conversation identity and per-call policy
+│   ├── turn-admission.ts    Durable idempotency gate
 │   ├── request-queue.ts     Same-conversation queue + cancellation state
 │   ├── chat-execution.ts    Streaming/non-streaming subprocess lifecycle
 │   └── standalone.ts        Startup probes, graceful shutdown, CLI entry
@@ -80,6 +85,7 @@ src/
 ├── config.ts             Timeouts, policies, per-family tuning
 ├── logger.ts             Structured JSON log events
 ├── model-availability.ts Startup model probes
+├── feature-scanner.ts    Periodic Claude/external provider probes
 ├── models.ts             Known model IDs, alias expansion
 └── claude-cli.inspect.ts Auth / version / probe helpers
 ```
@@ -94,17 +100,39 @@ src/
 
 4. **Adapter: OpenAI → CLI input.** `adapter/openai-to-cli.ts` pulls out system messages, assistant turns, and the final user message. It produces a `CliInput` with a prompt, an optional resolved system prompt, and session metadata. Multi-part content arrays (`[{type:"text", text:"..."}]`) are flattened.
 
-5. **Conversation queue.** The `user` field becomes the conversation key and `server/request-queue.ts` owns the per-conversation queue. Under `latest-wins`, a new request for the same key cancels any in-flight request and drops older queued work. Under `queue`, it waits FIFO. Queue events are emitted as structured logs when `CLAUDE_PROXY_DEBUG_QUEUES=true`.
+5. **Identity and durable admission.** `conversation_id` (body, metadata, or
+header) becomes the primary thread key, with legacy `user`, an endpoint-scoped
+hash of `Idempotency-Key`, and request-ID fallbacks. The turn is persisted
+before it enters the queue, and an idempotency key can replay a completed
+non-streaming result without running the provider twice.
 
-6. **Session resume decision.** `session/manager.ts` looks up whether this conversation already has a Claude CLI session ID. If so, the subprocess is spawned with `--resume <sessionId>`. Otherwise with `--session-id <newId>`. If resume fails twice in a row, the session is invalidated and the next request creates a fresh one.
+6. **Conversation queue.** `server/request-queue.ts` atomically sequences and
+admits work. Under `latest-wins`, a new request for the same key cancels
+in-flight work and drops older queued work. Under `queue`, it waits FIFO.
+Independent conversation keys run concurrently up to the global limit.
 
-7. **Subprocess spawn.** Every real Claude request spawns a fresh `claude` process via `spawn("claude", args, { env: cleanEnv })`. Base args include `--print --output-format stream-json --verbose --include-partial-messages --dangerously-skip-permissions --model <id>`; session resume, `--fallback-model sonnet`, and `--effort <level>` are added when needed.
+7. **Session fork decision.** `session/manager.ts` reads only the last committed
+Claude session. Resumed turns run with `--resume <sessionId> --fork-session`;
+the child session is committed atomically only after success. Cancellation,
+timeout, and disconnect never advance the parent checkpoint.
 
-8. **Stream parsing.** Stdout is parsed line-by-line as newline-delimited JSON. Each message is classified (`assistant`, `result`, `content_delta`) and emitted as a typed event. `adapter/cli-to-openai.ts` transforms each event into an OpenAI `chat.completion.chunk`.
+8. **Context reconstruction.** Stateless external-provider calls and fresh
+Claude fallbacks merge the committed transcript with the new request.
+Overlap detection avoids duplicating history when a client already resends the
+full conversation. A successful external-provider turn clears the incompatible
+Claude checkpoint; failed or cancelled attempts do not.
 
-9. **Streaming back.** Chunks are written to the HTTP response as Server-Sent Events. The final `data: [DONE]` sentinel terminates the stream. For non-streaming requests, chunks are buffered and a single `chat.completion` object is returned at the end.
+9. **Subprocess spawn.** Every real Claude request spawns a fresh `claude` process via `spawn("claude", args, { env: cleanEnv })`. Base args include `--print --output-format stream-json --verbose --include-partial-messages --dangerously-skip-permissions --model <id>`; session fork, `--fallback-model sonnet`, and `--effort <level>` are added when needed.
 
-10. **Cleanup.** On `close`, the subprocess is unregistered from the global registry and session state is updated with the resolved CLI session ID (for future resume).
+10. **Stream parsing and response.** Stdout is parsed line-by-line as
+newline-delimited JSON. Each message is classified (`assistant`, `result`,
+`content_delta`) and emitted as a typed event. Chunks are written as SSE, or
+buffered into one non-streaming completion.
+
+11. **Terminal commit.** Exactly one terminal path wins. Success persists the
+assistant result and child session. Supersession, explicit cancellation,
+timeout, or disconnect stops the provider and records a terminal turn without
+persisting partial output.
 
 ## Subprocess safety model
 
@@ -140,13 +168,18 @@ spawns its own `claude` subprocess.
 
 ## Startup sequence
 
-`server/standalone.ts` blocks on these gating checks before binding the HTTP
-server:
+`server/standalone.ts` performs these checks before binding the HTTP server:
 
 1. `verifyClaude()` — `claude --version`
 2. `verifyAuth()` — `claude auth status`
 3. `modelAvailability.getSnapshot(true)` — probes each candidate family in parallel via `probeModelAvailability()` with a 60 s timeout per probe
 4. `startServer()` — binds the HTTP server to `:3456`
+
+CLI, authentication, or zero-model failures are fatal when
+`CLAUDE_PROXY_REQUIRE_CLAUDE=true`. When explicit external providers make
+Claude optional, startup continues and those providers are probed by the
+background feature scanner. Each external scan has a 30-second deadline, and
+scanner shutdown aborts its active external probe.
 
 The session-manager load and CLI warm-up loop are kicked off by imported
 modules while the process boots. The SQLite conversation store initializes
@@ -160,8 +193,9 @@ information from the first request, not lie and then start failing.
 > [!NOTE]
 > On a truly cold or slow CLI, the startup model probes can still hit the 60 s
 > cap because the first `claude` invocations also have to warm auth and model
-> resolution. If this leaves `/health.models.available` empty even though auth
-> is valid, restart once more and test `claude --print --model sonnet "hi"`
+> resolution. If this leaves Claude absent from `/health.models.available`
+> even though auth is valid, restart once more and test
+> `claude --print --model sonnet "hi"`
 > manually. Repeated 60 s timeouts usually mean the CLI itself is slow or
 > wedged. See [TROUBLESHOOTING](./TROUBLESHOOTING.md).
 

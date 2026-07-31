@@ -7,8 +7,22 @@
  * probing resolves the current exact IDs dynamically.
  */
 
-export type ModelFamily = "opus" | "sonnet" | "haiku" | "fable";
+export type KnownModelFamily = "opus" | "sonnet" | "haiku" | "fable";
+export type ModelFamily = KnownModelFamily | (string & {});
 export type SpecialModelAlias = "default";
+
+export interface ClaudeModelDescriptor {
+  family: KnownModelFamily;
+  aliases: readonly string[];
+  patterns: readonly RegExp[];
+  timeoutMs: number;
+  stallTimeoutMs: number;
+  defaultPriority: number;
+  adaptiveReasoningMinVersion?: {
+    major: number;
+    minor: number;
+  };
+}
 
 export interface ModelDefinition {
   id: string;
@@ -25,39 +39,66 @@ export interface ParsedClaudeModelVersion {
   minor: number;
 }
 
-const MODEL_DEFINITIONS: ModelDefinition[] = [
+const CLAUDE_MODEL_DESCRIPTORS: readonly ClaudeModelDescriptor[] = [
   {
-    id: "sonnet",
     family: "sonnet",
-    alias: "sonnet",
+    aliases: ["sonnet"],
+    patterns: [/(?:^|[/:._-])sonnet(?:$|[/:._-])/i],
     timeoutMs: 600000,
     stallTimeoutMs: 90000,
+    defaultPriority: 0,
+    adaptiveReasoningMinVersion: { major: 4, minor: 6 },
   },
   {
-    id: "opus",
     family: "opus",
-    alias: "opus",
+    aliases: ["opus", "best"],
+    patterns: [/(?:^|[/:._-])opus(?:$|[/:._-])/i],
     timeoutMs: 1800000,
     stallTimeoutMs: 120000,
+    defaultPriority: 1,
+    adaptiveReasoningMinVersion: { major: 4, minor: 6 },
   },
   {
     // `fable` is a CLI-resolved alias for the latest Fable model
     // (e.g. `claude-fable-5`), mirroring how `opus`/`sonnet`/`haiku` work.
     // The Claude CLI owns the exact versioned ID; we only carry the alias
     // and a flagship-tier timeout policy here.
-    id: "fable",
     family: "fable",
-    alias: "fable",
+    aliases: ["fable"],
+    patterns: [/(?:^|[/:._-])fable(?:$|[/:._-])/i],
     timeoutMs: 1800000,
     stallTimeoutMs: 120000,
+    defaultPriority: 2,
+    adaptiveReasoningMinVersion: { major: 5, minor: 0 },
   },
   {
-    id: "haiku",
     family: "haiku",
-    alias: "haiku",
+    aliases: ["haiku"],
+    patterns: [/(?:^|[/:._-])haiku(?:$|[/:._-])/i],
     timeoutMs: 120000,
     stallTimeoutMs: 45000,
+    defaultPriority: 3,
   },
+];
+
+const UNKNOWN_MODEL_TIMEOUT_MS = 180000;
+const UNKNOWN_MODEL_STALL_TIMEOUT_MS = 90000;
+
+const MODEL_DEFINITIONS: ModelDefinition[] = [
+  {
+    id: "default",
+    family: "default",
+    alias: "default",
+    timeoutMs: UNKNOWN_MODEL_TIMEOUT_MS,
+    stallTimeoutMs: UNKNOWN_MODEL_STALL_TIMEOUT_MS,
+  },
+  ...CLAUDE_MODEL_DESCRIPTORS.map((descriptor) => ({
+    id: descriptor.aliases[0],
+    family: descriptor.family,
+    alias: descriptor.aliases[0],
+    timeoutMs: descriptor.timeoutMs,
+    stallTimeoutMs: descriptor.stallTimeoutMs,
+  })),
 ];
 
 // Provider prefixes that clients may prepend
@@ -68,20 +109,27 @@ export const PROVIDER_PREFIXES = [
 ];
 
 const SPECIAL_MODEL_ALIASES = new Set<SpecialModelAlias>(["default"]);
+const EXTENDED_CONTEXT_SUFFIX = /\[1m\]$/i;
 
-const FAMILY_PATTERNS: Record<ModelFamily, RegExp> = {
-  opus: /(?:^|[/:._-])opus(?:$|[/:._-])/i,
-  sonnet: /(?:^|[/:._-])sonnet(?:$|[/:._-])/i,
-  haiku: /(?:^|[/:._-])haiku(?:$|[/:._-])/i,
-  fable: /(?:^|[/:._-])fable(?:$|[/:._-])/i,
-};
+function stripClaudeModelVariantSuffix(model: string): string {
+  return model.replace(EXTENDED_CONTEXT_SUFFIX, "");
+}
+
+export function isExtendedContextModel(model: string): boolean {
+  return EXTENDED_CONTEXT_SUFFIX.test(
+    stripModelProviderPrefix(model).trim(),
+  );
+}
 
 function getModelConfig(family: ModelFamily): ModelDefinition {
   const definition = MODEL_DEFINITIONS.find((entry) => entry.family === family);
-  if (!definition) {
-    throw new Error(`Unknown model family: ${family}`);
-  }
-  return definition;
+  return definition ?? {
+    id: family,
+    family,
+    alias: family,
+    timeoutMs: UNKNOWN_MODEL_TIMEOUT_MS,
+    stallTimeoutMs: UNKNOWN_MODEL_STALL_TIMEOUT_MS,
+  };
 }
 
 function getModelConfigForName(model: string): ModelDefinition | null {
@@ -116,6 +164,10 @@ export function isSpecialModelAlias(model: string): boolean {
  * Returns null if the model is not recognized.
  */
 export function resolveModel(model: string): string | null {
+  const normalized = stripModelProviderPrefix(model).trim().toLowerCase();
+  if (isExtendedContextModel(normalized)) {
+    return normalized;
+  }
   const definition = getModelConfigForName(model);
   return definition?.alias ?? null;
 }
@@ -124,18 +176,32 @@ export function resolveModel(model: string): string | null {
  * Resolve a request model string to its model family.
  */
 export function resolveModelFamily(model: string): ModelFamily | null {
-  const normalized = stripModelProviderPrefix(model).toLowerCase();
+  const normalized = stripClaudeModelVariantSuffix(
+    stripModelProviderPrefix(model).toLowerCase(),
+  );
   if (!normalized) return null;
 
-  const exact = MODEL_DEFINITIONS.find((definition) => definition.alias === normalized);
-  if (exact) {
-    return exact.family;
+  for (const descriptor of CLAUDE_MODEL_DESCRIPTORS) {
+    if (descriptor.aliases.includes(normalized)) {
+      return descriptor.family;
+    }
+    if (descriptor.patterns.some((pattern) => pattern.test(normalized))) {
+      return descriptor.family;
+    }
   }
 
-  for (const definition of MODEL_DEFINITIONS) {
-    if (FAMILY_PATTERNS[definition.family].test(normalized)) {
-      return definition.family;
-    }
+  const futureClaudeMatch = normalized.match(
+    /(?:^|[/:._-])claude-([a-z][a-z0-9-]*?)-\d+(?:-\d+)?(?:$|[/:._-])/i,
+  );
+  if (futureClaudeMatch) {
+    return futureClaudeMatch[1];
+  }
+
+  const unversionedClaudeMatch = normalized.match(
+    /(?:^|[/:._-])claude-([a-z][a-z0-9]*)(?:$|[/:._-])/i,
+  );
+  if (unversionedClaudeMatch) {
+    return unversionedClaudeMatch[1];
   }
 
   return null;
@@ -144,12 +210,42 @@ export function resolveModelFamily(model: string): ModelFamily | null {
 export function createModelDefinition(
   family: ModelFamily,
   modelId?: string,
+  alias?: string,
 ): ModelDefinition {
   const definition = getModelConfig(family);
   return {
     ...definition,
     id: normalizeModelName(modelId ?? definition.alias, family),
+    alias: alias ?? definition.alias,
   };
+}
+
+/**
+ * Convert a successful CLI probe into a routable definition. Unlike the
+ * built-in family lookup, this deliberately preserves future Claude model IDs
+ * that this version of the proxy has never seen before.
+ */
+export function createModelDefinitionFromProbe(
+  alias: string,
+  resolvedModel?: string,
+): ModelDefinition | null {
+  const normalizedAlias = stripModelProviderPrefix(alias).trim().toLowerCase();
+  const normalizedModel = stripModelProviderPrefix(
+    resolvedModel || normalizedAlias,
+  ).trim();
+  if (!normalizedAlias || !normalizedModel) return null;
+
+  const family =
+    resolveModelFamily(normalizedModel) ??
+    resolveModelFamily(normalizedAlias) ??
+    (normalizedModel.toLowerCase().startsWith("claude-")
+      ? normalizedModel
+          .slice("claude-".length)
+          .split(/[-/:._]/)
+          .filter(Boolean)[0] || "unknown"
+      : "unknown");
+
+  return createModelDefinition(family, normalizedModel, normalizedAlias);
 }
 
 /**
@@ -174,7 +270,16 @@ export function getStallTimeout(model: string): number {
  * Check if a model string is recognized.
  */
 export function isValidModel(model: string): boolean {
-  return isSpecialModelAlias(model) || getModelConfigForName(model) !== null;
+  const normalized = stripModelProviderPrefix(model).toLowerCase();
+  if (isExtendedContextModel(normalized)) {
+    const family = resolveModelFamily(normalized);
+    return family === "sonnet" || family === "opus";
+  }
+  return (
+    isSpecialModelAlias(normalized) ||
+    getModelConfigForName(normalized) !== null ||
+    /^claude-[a-z0-9][a-z0-9._-]*$/i.test(normalized)
+  );
 }
 
 export function isClaudeModelRequest(
@@ -209,28 +314,32 @@ export function normalizeModelName(
 export function parseClaudeModelVersion(
   model: string,
 ): ParsedClaudeModelVersion | null {
-  const normalized = stripModelProviderPrefix(model).toLowerCase();
-  const match = normalized.match(/(opus|sonnet|haiku|fable)-(\d+)-(\d+)/i);
+  const normalized = stripClaudeModelVariantSuffix(
+    stripModelProviderPrefix(model).toLowerCase(),
+  );
+  const match = normalized.match(
+    /(?:^|[/:._-])claude-([a-z][a-z0-9-]*?)-(\d+)(?:-(\d+))?(?:$|[/:._-])/i,
+  ) ?? normalized.match(
+    /(?:^|[/:._-])([a-z][a-z0-9-]*?)-(\d+)(?:-(\d+))?(?:$|[/:._-])/i,
+  );
   if (!match) return null;
   return {
-    family: match[1] as ModelFamily,
+    family: resolveModelFamily(normalized) ?? match[1],
     major: Number(match[2]),
-    minor: Number(match[3]),
+    minor: match[3] === undefined ? 0 : Number(match[3]),
   };
 }
 
 export function supportsAdaptiveReasoningModel(model: string): boolean {
   const parsed = parseClaudeModelVersion(model);
   if (!parsed) return false;
-  if (
-    parsed.family !== "opus" &&
-    parsed.family !== "sonnet" &&
-    parsed.family !== "fable"
-  ) {
-    return false;
-  }
-  if (parsed.major > 4) return true;
-  return parsed.major === 4 && parsed.minor >= 6;
+  const descriptor = CLAUDE_MODEL_DESCRIPTORS.find(
+    (entry) => entry.family === parsed.family,
+  );
+  const minimum = descriptor?.adaptiveReasoningMinVersion;
+  if (!minimum) return false;
+  if (parsed.major !== minimum.major) return parsed.major > minimum.major;
+  return parsed.minor >= minimum.minor;
 }
 
 /**
@@ -253,4 +362,46 @@ export function getModelDefinitions(): ModelDefinition[] {
 
 export function getCanonicalModelId(family: ModelFamily): string {
   return getModelConfig(family).alias;
+}
+
+export function getClaudeModelDescriptors(): ClaudeModelDescriptor[] {
+  return CLAUDE_MODEL_DESCRIPTORS.map((descriptor) => ({
+    ...descriptor,
+    aliases: [...descriptor.aliases],
+    patterns: [...descriptor.patterns],
+    adaptiveReasoningMinVersion: descriptor.adaptiveReasoningMinVersion
+      ? { ...descriptor.adaptiveReasoningMinVersion }
+      : undefined,
+  }));
+}
+
+export function getAcceptedClaudeModelSelectors(): string[] {
+  return [
+    "default",
+    ...CLAUDE_MODEL_DESCRIPTORS.flatMap((descriptor) => descriptor.aliases),
+    "sonnet[1m]",
+    "opus[1m]",
+  ];
+}
+
+export function getDefaultModelFamilyOrder(): ModelFamily[] {
+  return [...CLAUDE_MODEL_DESCRIPTORS]
+    .sort((left, right) => left.defaultPriority - right.defaultPriority)
+    .map((descriptor) => descriptor.family);
+}
+
+/**
+ * Bare Claude aliases/IDs must not be claimed by an external provider because
+ * external routing currently runs before Claude resolution. Provider-qualified
+ * IDs (for example `openrouter/anthropic/claude-sonnet-4`) remain safe.
+ */
+export function isCollisionProneExternalModelId(model: string): boolean {
+  const raw = (model || "").trim();
+  if (!raw) return true;
+  const normalized = stripModelProviderPrefix(raw).toLowerCase();
+  const hasExternalNamespace =
+    normalized.includes("/") &&
+    !PROVIDER_PREFIXES.some((prefix) => raw.toLowerCase().startsWith(prefix));
+  if (hasExternalNamespace) return false;
+  return isSpecialModelAlias(normalized) || isValidModel(normalized);
 }

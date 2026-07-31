@@ -69,6 +69,7 @@ function buildSnapshot(): OpsDashboardSnapshot {
         {
           conversationId: "conv_active_123456",
           queued: 2,
+          queuedRequestIds: ["req_queued_1", "req_queued_2"],
           processing: true,
           waitMs: 640,
           active: true,

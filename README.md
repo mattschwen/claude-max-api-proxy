@@ -2,204 +2,73 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="./assets/banner-dark.svg">
-  <img alt="Claw Proxy - OpenAI-compatible gateway powered by Claude Code CLI." src="./assets/banner-light.svg" width="100%">
+  <img alt="Claw Proxy — OpenAI-compatible, Claude-first, multi-provider gateway." src="./assets/banner-light.svg" width="100%">
 </picture>
 
+**One local endpoint for the OpenAI-compatible tools you already use.**
+
+Claude CLI is the default route. Gemini CLI, GLM, and other configured
+OpenAI-compatible providers stay explicit and opt-in.
+
 <p>
-  <b>Claw Proxy</b> is the user-facing name for
-  <code>claude-max-api-proxy</code>.
+  <a href="https://github.com/mattschwen/claude-max-api-proxy/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/mattschwen/claude-max-api-proxy?style=flat-square&logo=github&color=ff4fa8&labelColor=08101d"></a>
+  <a href="https://github.com/mattschwen/claude-max-api-proxy/actions/workflows/ci.yml"><img alt="CI status" src="https://img.shields.io/github/actions/workflow/status/mattschwen/claude-max-api-proxy/ci.yml?branch=main&style=flat-square&label=CI&labelColor=08101d&color=74ffb0"></a>
+  <a href="./LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-2fe6ff?style=flat-square&labelColor=08101d"></a>
+  <img alt="Node.js 22 or newer" src="https://img.shields.io/badge/node-22+-74ffb0?style=flat-square&logo=nodedotjs&labelColor=08101d">
+  <img alt="OpenAI compatible" src="https://img.shields.io/badge/OpenAI-compatible-2fe6ff?style=flat-square&labelColor=08101d">
 </p>
 
 <p>
-  <a href="#jack-in"><img alt="jack in" src="https://img.shields.io/badge/jack--in-60s-ff3fd1?style=flat-square&labelColor=08101d"></a>
-  <a href="./LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-3df7ff?style=flat-square&labelColor=08101d"></a>
-  <img alt="node" src="https://img.shields.io/badge/node-22+-7dfb86?style=flat-square&labelColor=08101d">
-  <img alt="openai" src="https://img.shields.io/badge/openai-compatible-3df7ff?style=flat-square&labelColor=08101d">
-  <img alt="models" src="https://img.shields.io/badge/models-dynamic-a87cff?style=flat-square&labelColor=08101d">
-  <img alt="resume" src="https://img.shields.io/badge/sessions-resume-ff9df3?style=flat-square&labelColor=08101d">
-  <img alt="docker" src="https://img.shields.io/badge/docker-optional-4ac1ff?style=flat-square&labelColor=08101d">
-  <img alt="typescript" src="https://img.shields.io/badge/typescript-strict-6d8cff?style=flat-square&labelColor=08101d">
+  <a href="#quick-start"><b>Quick start</b></a>
+  ·
+  <a href="#client-setup"><b>Client setup</b></a>
+  ·
+  <a href="./docs/reference/API.md"><b>Explore the API</b></a>
 </p>
 
-<p>
-  <b>Route any OpenAI-compatible client into your live Claude Max session.</b><br/>
-  OpenAI on the edge. Claude Code CLI in the core. Localhost in between.
-</p>
-
-<p>
-  <code>Continue.dev</code> / <code>Aider</code> / <code>OpenAI SDKs</code> / <code>curl</code>
-  &rarr; <code>127.0.0.1:3456</code>
-  &rarr; <code>Claw Proxy</code>
-  &rarr; <code>authenticated claude CLI</code>
-  &rarr; <code>Claude Max</code>
-</p>
-
-<p>
-  <a href="#why-claw-proxy-exists">Why</a> ·
-  <a href="#request-path">Request Path</a> ·
-  <a href="#default-routing">Default Routing</a> ·
-  <a href="#systems-online">Systems</a> ·
-  <a href="#jack-in">Jack In</a> ·
-  <a href="#production-deployments">Deploy</a> ·
-  <a href="#plug-in-any-openai-client">Clients</a> ·
-  <a href="./docs/reference/API.md">API</a> ·
-  <a href="./docs/reference/CONFIGURATION.md">Config</a> ·
-  <a href="./docs/reference/CODEBASE_INDEX.md">Code Index</a> ·
-  <a href="./docs/reference/ARCHITECTURE.md">Architecture</a> ·
-  <a href="./docs/reference/TROUBLESHOOTING.md">Troubleshooting</a>
-</p>
+<sub>Continue · Aider · OpenAI SDKs · Open WebUI · curl · custom agents</sub>
 
 </div>
 
 ---
 
-## Why Claw Proxy Exists
+## Why Claw Proxy
 
-You already have a working Claude Max session on your machine. Your local
-`claude` CLI is authenticated. But the rest of the modern tooling ecosystem
-keeps asking for an OpenAI-compatible `baseURL`.
+You already have an authenticated Claude CLI session on your machine. But the
+rest of the modern tooling ecosystem keeps asking for an OpenAI-compatible
+`baseURL`.
 
-That mismatch is the whole reason this project exists.
-
-**Claw Proxy** is the product identity for this repo. The repository and
-package stay named `claude-max-api-proxy`, but the thing you actually run is a
-local bridge that speaks OpenAI on the outside and Claude Code CLI on the
-inside.
-
-Claw Proxy runs a local HTTP server on `127.0.0.1:3456`, accepts OpenAI-shaped
-requests, invokes the authenticated Claude Code CLI underneath, and streams the
-result back in the format your client already expects.
-
-On the default Claude path: no separate Anthropic API key, no extra Anthropic
-API bill, and no Docker requirement. External OpenAI-compatible providers are
-optional. Just your existing Claude Max session exposed behind a sharp, local,
-OpenAI-shaped surface, with extra routes available when you choose to wire them
-in.
-
-<table>
-  <tr>
-    <td width="33%" valign="top">
-      <b>OUTER SHELL</b><br/>
-      Keep your existing SDKs, editors, and agents. Change the base URL, not
-      your workflow.
-    </td>
-    <td width="33%" valign="top">
-      <b>INNER LINK</b><br/>
-      Requests flow through the authenticated <code>claude</code> CLI, so the
-      proxy rides the real local session you already use.
-    </td>
-    <td width="33%" valign="top">
-      <b>MODEL SCAN</b><br/>
-      Stable aliases stay simple while <code>/v1/models</code> publishes the
-      exact model IDs your installed CLI resolves today.
-    </td>
-  </tr>
-</table>
-
-## At A Glance
-
-| What you need to know | Meaning in practice |
-| --- | --- |
-| Claude is always the implicit default | Omit `model`, use `default`, or use Claude aliases like `sonnet`, `opus`, `fable`, and `haiku` to stay on the Claude route. |
-| External models are explicit only | Gemini CLI, GLM, and other OpenAI-compatible providers only activate when the request names that exact external model ID. |
-| Operators get built-in visibility | `/`, `/ops`, `/launch`, `/health`, and `/metrics` are all served by the proxy itself. |
-| Production can stay simple | Host-run Node first. Add LaunchAgent, systemd, or Docker only when you actually need service management. |
-
-## Request Path
-
-### Default Claude Path
+**Claw Proxy closes that gap.**
 
 ```text
-┌──────────────────────────────────────┐
-│ OpenAI-compatible client             │
-│ Continue / Aider / SDK / curl        │
-└──────────────────┬───────────────────┘
-                   │ POST /v1/chat/completions
-                   ▼
-┌──────────────────────────────────────┐
-│ Claw Proxy                           │
-│ 127.0.0.1:3456                       │
-│ queue • sessions • metrics • /ops    │
-└──────────────────┬───────────────────┘
-                   │ local Claude subprocess
-                   ▼
-┌──────────────────────────────────────┐
-│ Claude Code CLI                      │
-│ authenticated on this machine        │
-└──────────────────┬───────────────────┘
-                   │ Max subscription
-                   ▼
-┌──────────────────────────────────────┐
-│ Claude                               │
-│ default route                        │
-└──────────────────────────────────────┘
+your editor / SDK / agent
+          │
+          │  OpenAI request
+          ▼
+  http://127.0.0.1:3456/v1
+          │
+          ▼
+     Claw Proxy router
+       ├─ Claude Code CLI (default)
+       └─ configured provider (explicit)
 ```
 
-### Explicit External Path
+Your client keeps speaking OpenAI. Claude keeps running through the CLI session
+you already trust, while configured external models remain available by
+explicit model ID. The bridge stays on your machine.
 
-```text
-┌──────────────────────────────────────┐
-│ OpenAI-compatible client             │
-│ model = gemini-* / glm-* / other     │
-└──────────────────┬───────────────────┘
-                   │ POST /v1/chat/completions
-                   ▼
-┌──────────────────────────────────────┐
-│ Claw Proxy                           │
-│ exact external model match required  │
-└──────────────────┬───────────────────┘
-                   │ explicit provider route
-                   ▼
-┌──────────────────────────────────────┐
-│ External provider                    │
-│ gemini CLI / Z.AI / OpenAI endpoint  │
-└──────────────────────────────────────┘
-```
+## Quick Start
 
-Configured external models such as `gemini-2.5-pro`, `gemini-2.5-flash`,
-`glm-4.7-flash`, `glm-5`, or `glm-4.7` are advertised through
-`GET /v1/models`, but they never become the implicit default.
-
-## Default Routing
-
-| Request `model` | Effective route |
-| --- | --- |
-| omitted | Claude default path |
-| `default` | Claude account-tier default |
-| `sonnet`, `opus`, `fable`, `haiku` | Claude family alias |
-| exact Claude ID from `/v1/models` | Claude exact runtime model |
-| configured `gemini-*` or `glm-*` model | Explicit external route |
-
-If Claude is unavailable and the request did **not** explicitly ask for an
-external model, the proxy returns a Claude error instead of silently switching
-providers.
-
-## Systems Online
-
-| Surface | Why it matters |
-| --- | --- |
-| OpenAI-compatible edge | `POST /v1/chat/completions`, `POST /v1/responses`, `GET /v1/models`, `GET /v1/capabilities`, `GET /v1/agents`, `GET /health`, and `GET /metrics`. |
-| Zero extra credentials | Reuses the machine's existing `claude auth login` session instead of asking clients for a second API key. |
-| Dynamic model routing | Probes stable families like `sonnet`, `opus`, `fable`, and `haiku`, then surfaces the exact model IDs your local Claude CLI currently resolves. |
-| Agent discovery | `GET /v1/capabilities` advertises the current runtime surface, CLI feature flags, and which resolved models use adaptive reasoning. |
-| Canonical coding agent | Ship one repo-native `expert-coder` agent so external tools can reuse the same curated coding brain instead of inventing their own prompts. |
-| Session continuity | Reuses the OpenAI `user` field as a conversation key and resumes the underlying CLI session automatically. |
-| Optional external providers | Claude stays the default path. External models such as Gemini or Z.AI GLM are available only when you request them explicitly by model ID. |
-| Operational discipline | CLI warm-up loop, per-family stall timeouts, kill escalation, structured logs, and a detailed `/health` snapshot. |
-| Operator command center | `GET /` serves the native Grafana-style command deck, `GET /ops` and `GET /dashboard` mirror it, and `GET /launch` keeps the cinematic launch deck for quick links and signal summaries. |
-| Sensible deployment | Plain Node.js checkout first. Docker supported, but optional. macOS and Linux service docs included. |
-
-## Jack In
-
-You need **Node.js 22+**, **npm**, and the **Claude Code CLI** already logged
-in.
+You need **Node.js 22+**, **npm**, and the
+[Claude Code CLI](https://github.com/anthropics/claude-code) authenticated on
+this machine.
 
 ```bash
-# 1. Install Claude CLI and authenticate (skip if already installed)
+# Authenticate once
 npm install -g @anthropic-ai/claude-code
 claude auth login
 
-# 2. Clone, install, build, run
+# Clone and launch
 git clone https://github.com/mattschwen/claude-max-api-proxy.git
 cd claude-max-api-proxy
 npm install
@@ -207,18 +76,122 @@ npm run build
 npm start
 ```
 
-The proxy warms up by probing model availability against your authenticated CLI,
-then binds to `http://127.0.0.1:3456`.
+When the model scan finishes, the bridge is live at
+`http://127.0.0.1:3456`.
 
 ```bash
 curl http://127.0.0.1:3456/health
-curl http://127.0.0.1:3456/metrics
-open http://127.0.0.1:3456/
-open http://127.0.0.1:3456/ops
 curl http://127.0.0.1:3456/v1/models
-curl http://127.0.0.1:3456/v1/capabilities
-curl http://127.0.0.1:3456/v1/agents
 ```
+
+## Client Setup
+
+Most clients only need these three values:
+
+| Client setting | Value |
+| --- | --- |
+| Base URL | `http://127.0.0.1:3456/v1` |
+| API key | Any non-empty string if the client requires one |
+| Model | `sonnet`, `opus`, `best`, `fable`, `haiku`, or `default` |
+
+Then send a normal OpenAI request:
+
+```bash
+curl -N http://127.0.0.1:3456/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "sonnet",
+    "stream": true,
+    "messages": [
+      { "role": "user", "content": "Reply with: bridge online" }
+    ]
+  }'
+```
+
+<details>
+<summary><b>OpenAI Python SDK</b></summary>
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://127.0.0.1:3456/v1",
+    api_key="local",
+)
+
+response = client.chat.completions.create(
+    model="sonnet",
+    messages=[{"role": "user", "content": "Reply with: bridge online"}],
+)
+
+print(response.choices[0].message.content)
+```
+
+</details>
+
+<details>
+<summary><b>OpenAI TypeScript SDK</b></summary>
+
+```typescript
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  baseURL: "http://127.0.0.1:3456/v1",
+  apiKey: "local",
+});
+
+const response = await client.chat.completions.create({
+  model: "sonnet",
+  messages: [{ role: "user", content: "Reply with: bridge online" }],
+});
+
+console.log(response.choices[0].message.content);
+```
+
+</details>
+
+## What You Get
+
+- **Keep your toolchain.** Change the base URL instead of rewriting your editor,
+  agent, SDK integration, or scripts.
+- **Reuse the session you already have.** The default Claude route runs through
+  the authenticated local CLI—no second Anthropic credential to distribute.
+- **Stream like an OpenAI endpoint.** Chat Completions emits OpenAI-shaped SSE;
+  newer agent stacks can also use the Responses compatibility surface.
+- **Keep conversations alive.** Stable conversation keys isolate queues,
+  persist checkpoints, and resume committed CLI sessions.
+- **See what the bridge is doing.** Health, capabilities, Prometheus metrics,
+  structured logs, cancellation, and a built-in operator dashboard ship with
+  the proxy.
+- **Scale only when you need to.** Run plain Node on localhost first; add
+  LaunchAgent, systemd, Docker, Open WebUI, or explicit external providers
+  later.
+
+## Routing stays explicit
+
+| Requested model | Effective route |
+| --- | --- |
+| Omitted or `default` | Claude account-tier default |
+| `sonnet`, `opus`, `best`, `fable`, `haiku` | Claude family selector (`best` follows Opus) |
+| `sonnet[1m]`, `opus[1m]`, or a supported full ID with `[1m]` | Account-gated extended-context selector passed through to Claude Code |
+| Exact Claude ID from `/v1/models` | Exact runtime Claude model |
+| Configured `gemini-*`, `glm-*`, or other external ID | That explicit external provider |
+
+External models never silently replace Claude. If the default Claude path is
+unavailable, the proxy returns a Claude error unless you explicitly request a
+configured external model.
+
+## API and Operations
+
+| Surface | What it gives you |
+| --- | --- |
+| `POST /v1/chat/completions` | Streaming and non-streaming OpenAI-compatible chat |
+| `POST /v1/responses` | Responses-style input, instructions, and continuation |
+| `GET /v1/models` | Runtime-resolved Claude IDs plus explicit external models |
+| `GET /v1/capabilities` | Model, reasoning, provider, and CLI feature discovery |
+| `GET /health` · `GET /metrics` | Readiness, runtime state, and Prometheus telemetry |
+| `GET /` · `GET /ops` | Built-in queue, session, latency, subprocess, and log views |
+| `DELETE /v1/requests/:id` | Cancellation for queued or active work |
 
 > [!IMPORTANT]
 > If `/v1/models` returns `{"object":"list","data":[]}`, the proxy started but
@@ -226,10 +199,11 @@ curl http://127.0.0.1:3456/v1/agents
 > See [docs/reference/TROUBLESHOOTING.md](./docs/reference/TROUBLESHOOTING.md).
 
 > [!NOTE]
-> Prefer containers? See [docs/setup/docker-setup.md](./docs/setup/docker-setup.md). Docker
-> is supported, but not required.
+> The default server trusts local clients and binds to `127.0.0.1`. Do not
+> expose it beyond a trusted machine without real authentication and network
+> controls. Your Claude plan limits and provider terms still apply.
 
-## Local Command Stack
+## Optional Local Stack
 
 For the best local setup, run the Claude-backed proxy on the host so it can
 reuse your authenticated CLI session directly, then optionally bring up
@@ -256,6 +230,9 @@ That stack gives you:
 The dashboard is built into the proxy itself. It renders the queue, live
 throughput, latency traces, session state, subprocesses, recent conversations,
 and structured logs directly from the proxy runtime and `/metrics?format=json`.
+The launch deck’s Chat Lab keeps multiple independent thread tabs alive at
+once, can branch a transcript, and lets each thread choose interrupt or FIFO
+behavior without restarting the server.
 Open WebUI comes up pointed at the local proxy by default and can also be
 redirected toward other OpenAI-compatible backends from env or provider
 settings.
@@ -280,7 +257,9 @@ settings.
 
 There are four separate knobs:
 
-- Request body `model`: chooses the actual model to run. Omit it, use `default`, or use Claude aliases like `sonnet`, `opus`, `fable`, and `haiku` to stay on the Claude path.
+- Request body `model`: chooses the actual model to run. Omit it, use `default`,
+  or use Claude selectors like `sonnet`, `opus`, `best`, `fable`, and `haiku`
+  to stay on the Claude path.
 - `CLAUDE_PROXY_MODEL_FALLBACKS`: chooses the Claude-only step-down order when the requested Claude family is unavailable.
 - `GEMINI_CLI_MODEL` and `GEMINI_CLI_EXTRA_MODELS`: choose the local Gemini CLI models that `/v1/models` advertises through this proxy.
 - `OPENAI_COMPAT_FALLBACK_MODEL` or `ZAI_MODEL`: chooses the external OpenAI-compatible API model that `/v1/models` advertises.
@@ -366,57 +345,7 @@ When an external provider is configured:
 - Requests that omit `model`, use `default`, or ask for Claude families remain Claude-first and return Claude errors if Claude is unavailable.
 - If you want Open WebUI to use one of those external models, set `OPEN_WEBUI_TASK_MODEL_EXTERNAL` to that exact external model ID.
 
-## Plug In Any OpenAI Client
-
-### Python
-
-```python
-from openai import OpenAI
-
-client = OpenAI(
-    base_url="http://127.0.0.1:3456/v1",
-    api_key="ignored",
-)
-
-resp = client.chat.completions.create(
-    model="sonnet",
-    messages=[{"role": "user", "content": "Say hi in one word."}],
-)
-
-print(resp.choices[0].message.content)
-```
-
-### TypeScript
-
-```typescript
-import OpenAI from "openai";
-
-const client = new OpenAI({
-  baseURL: "http://127.0.0.1:3456/v1",
-  apiKey: "ignored",
-});
-
-const resp = await client.chat.completions.create({
-  model: "sonnet",
-  messages: [{ role: "user", content: "Say hi in one word." }],
-});
-
-console.log(resp.choices[0].message.content);
-```
-
-### curl
-
-```bash
-curl -N http://127.0.0.1:3456/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "sonnet",
-    "stream": true,
-    "messages": [
-      { "role": "user", "content": "Write a haiku about local proxies." }
-    ]
-  }'
-```
+## Client Integrations
 
 ### Common client defaults
 
@@ -424,7 +353,7 @@ curl -N http://127.0.0.1:3456/v1/chat/completions \
 | --- | --- |
 | Base URL | `http://127.0.0.1:3456/v1` |
 | API key | any non-empty string if your client requires one |
-| Model | `sonnet`, `opus`, `fable`, `haiku`, `default`, an exact Claude ID from `/v1/models`, or one explicitly requested external model such as `glm-4.7-flash` or `gemini-2.5-flash` |
+| Model | `sonnet`, `opus`, `best`, `fable`, `haiku`, `default`, an account-supported `sonnet[1m]` / `opus[1m]` selector, an exact Claude ID from `/v1/models`, or one explicitly requested external model such as `glm-4.7-flash` or `gemini-2.5-flash` |
 
 The proxy accepts stable family aliases and resolves them to whatever exact
 version the installed Claude CLI currently exposes. `GET /v1/models` returns
@@ -434,6 +363,7 @@ those runtime-resolved IDs plus the configured external model, if any.
 
 - `POST /v1/chat/completions` remains the best choice for existing OpenAI-compatible SDKs and streaming clients.
 - `POST /v1/responses` provides a minimal Responses API surface for newer agent stacks that want `input`, `instructions`, and `previous_response_id`.
+- `DELETE /v1/requests/:requestId` cancels queued or active work using the response's `X-Request-Id`.
 - `GET /v1/capabilities` lets adapters inspect current model IDs, reasoning support, and local Claude CLI feature flags before they connect.
 - `GET /v1/agents` and `GET /v1/agents/expert-coder` expose the built-in expert coding agent profile.
 - `POST /v1/agents/expert-coder/chat/completions` and `POST /v1/agents/expert-coder/responses` force requests through the canonical coding agent.
@@ -502,14 +432,18 @@ Everything is environment-variable driven. The full reference lives in
 # Cancel the in-flight request when a newer one lands for the same conversation
 export CLAUDE_PROXY_SAME_CONVERSATION_POLICY=latest-wins
 
-# Or: strict FIFO for each conversation key
+# Or: FIFO for each conversation key after request validation
 export CLAUDE_PROXY_SAME_CONVERSATION_POLICY=queue
+
+# Run several independent conversation threads at once
+export CLAUDE_PROXY_MAX_CONCURRENT_REQUESTS=4
 
 # Extra visibility into queue internals
 export CLAUDE_PROXY_DEBUG_QUEUES=true
 
-# Optional: enable the runtime thinking-budget admin endpoint
+# Optional: enable protected runtime controls
 # export CLAUDE_PROXY_ENABLE_ADMIN_API=true
+# export CLAUDE_PROXY_ADMIN_TOKEN=replace-with-a-long-random-token
 
 npm start
 ```
@@ -520,7 +454,7 @@ Use this checklist when you want to run the proxy like infrastructure instead
 of a dev process:
 
 1. Keep Claude as the default route by using `default`, `sonnet`, `opus`,
-   `haiku`, or a resolved Claude model ID from `/v1/models`.
+   `best`, `fable`, `haiku`, or a resolved Claude model ID from `/v1/models`.
 2. Persist `DB_PATH`, `SESSION_FILE`, and `RUNTIME_STATE_FILE` so sessions,
    metrics, and runtime overrides survive restarts.
 3. Set `CLAUDE_PROXY_LOG_FILE` so structured logs are written somewhere
@@ -528,7 +462,8 @@ of a dev process:
 4. Probe `GET /health`, scrape `GET /metrics`, and use `GET /ops` or
    `GET /launch` as the human operator surfaces.
 5. Keep the service on localhost unless you place real network controls in
-   front of it. The proxy does not authenticate clients.
+   front of it. Inference and cancellation routes do not authenticate clients,
+   and the Ops surfaces include local conversation diagnostics.
 6. Use a service manager instead of a bare shell:
    - macOS LaunchAgent
    - Linux systemd user service
@@ -603,7 +538,8 @@ issue templates when they apply, and follow the expectations in
 
 The proxy binds to `127.0.0.1` by default and trusts the local Claude CLI
 session. It does **not** authenticate clients. Anything that can reach `:3456`
-can spend your Claude Max quota.
+can spend your Claude Max quota, inspect operational diagnostics, or cancel a
+request if it obtains that request's opaque ID.
 
 Keep it on localhost unless you deliberately place it behind real network
 controls, and leave the optional admin API disabled unless you explicitly need

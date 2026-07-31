@@ -180,4 +180,33 @@ test("GeminiCliProvider advertises default and extra local CLI models", () => {
     command: "/opt/homebrew/bin/gemini",
     workdir: "/tmp/gemini-proxy",
   });
+  assert.equal(
+    provider.getModelDescriptor("gemini-2.5-flash")?.capabilities.streaming,
+    true,
+  );
+  assert.equal(provider.getModelDescriptor("gemini-2.5-pro")?.timeoutMs, 180000);
+  assert.equal(provider.getAvailability().state, "unknown");
+});
+
+test("GeminiCliProvider distinguishes configured from executable availability", async () => {
+  const provider = new GeminiCliProvider(
+    {
+      provider: "gemini-cli",
+      command: "/definitely/missing/gemini",
+      model: "gemini-test",
+      extraModels: [],
+      workdir: "/tmp/gemini-proxy-missing",
+      streamMode: "synthetic",
+    },
+    {
+      now: () => 1234,
+      randomId: () => "req123",
+    },
+  );
+
+  const availability = await provider.probeAvailability();
+  assert.equal(availability.configured, true);
+  assert.equal(availability.state, "unavailable");
+  assert.deepEqual(availability.unavailableModels, ["gemini-test"]);
+  assert.match(availability.error || "", /not found/i);
 });

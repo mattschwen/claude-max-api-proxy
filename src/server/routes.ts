@@ -23,6 +23,7 @@ import { openaiToCli } from "../adapter/openai-to-cli.js";
 import { sessionManager } from "../session/manager.js";
 import { conversationStore } from "../store/conversation.js";
 import {
+  getAcceptedClaudeModelSelectors,
   getModelTimeout,
   isClaudeModelRequest,
   isValidModel,
@@ -34,12 +35,19 @@ import { modelAvailability } from "../model-availability.js";
 import { type ClaudeProxyError } from "../claude-cli.inspect.js";
 import { runtimeConfig, persistRuntimeState } from "../config.js";
 import {
+  getConfiguredExternalProviders,
   getExternalProviderForModel,
+  getExternalProviderAvailability,
   getPublicExternalModelList,
   getPublicExternalProviderInfos,
 } from "../external-providers.js";
 import {
+  getLastFeatureScan,
+  scanAvailableFeatures,
+} from "../feature-scanner.js";
+import {
   chatToResponsesResponse,
+  responsesInputHasText,
   responsesToChatRequest,
 } from "../adapter/responses.js";
 import {
@@ -56,10 +64,7 @@ import {
 } from "../reasoning.js";
 import { proxyMetrics } from "../observability/metrics.js";
 import { responseConversationStore } from "./response-conversations.js";
-import {
-  buildCapabilitiesSummary,
-  collectOperationalSnapshot,
-} from "./runtime-snapshot.js";
+import { collectOperationalSnapshot } from "./runtime-snapshot.js";
 import { collectOpsDashboardSnapshot } from "./ops-snapshot.js";
 import {
   buildOperationalJsonSnapshot,
@@ -74,16 +79,43 @@ import {
 } from "./chat-execution.js";
 import { buildQueueSnapshot } from "./queue-snapshot.js";
 import {
+  buildHealthModelSummary,
+  buildPublicHealthQueueStatus,
+  resolveExternalModelAvailability,
+} from "./health-models.js";
+import { mergeCommittedConversationMessages } from "./conversation-replay.js";
+import {
   conversationRequestQueue,
   MAX_QUEUE_DEPTH,
+  QueueFullError,
   RequestCancelledError,
 } from "./request-queue.js";
 import { handleExternalChatCompletions } from "./external-chat.js";
+import { sanitizePublicProviderBaseUrl } from "../fallback-provider.js";
+import {
+  resolveConversationId,
+  resolveConversationPolicy,
+  resolveIdempotencyKey,
+  setRequestIdentityHeaders,
+} from "./request-context.js";
+import {
+  beginDurableTurn,
+  readLastUserText,
+} from "./turn-admission.js";
 export { isAuthError, withAuthRetry } from "./auth-retry.js";
 
 // ---------------------------------------------------------------------------
 // Responses API compatibility
 // ---------------------------------------------------------------------------
+
+const responseParentCheckpoint = Symbol("responseParentCheckpoint");
+
+type InternalChatRequest = OpenAIChatRequest & Record<string, unknown> & {
+  [responseParentCheckpoint]?: {
+    sessionId: string;
+    model: string;
+  };
+};
 
 // ---------------------------------------------------------------------------
 // Main handler
@@ -138,6 +170,32 @@ function buildExternalExplicitOnlySuffix(
   return " External providers are configured, but Claude remains the implicit default. Request one of the external model IDs from GET /v1/models explicitly if you want to route there.";
 }
 
+export function buildPublicRuntimeConfig(): Record<string, unknown> {
+  return {
+    sameConversationPolicy: runtimeConfig.sameConversationPolicy,
+    maxConcurrentRequests: runtimeConfig.maxConcurrentRequests,
+    debugQueues: runtimeConfig.debugQueues,
+    enableAdminApi: runtimeConfig.enableAdminApi,
+    defaultAgent: runtimeConfig.defaultAgent ?? null,
+    modelFallbacks: runtimeConfig.modelFallbacks,
+    geminiCliFallback: runtimeConfig.geminiCliFallback,
+    // The full runtime object contains an API key. Keep this unauthenticated
+    // diagnostic payload deliberately credential-free.
+    externalFallback: runtimeConfig.externalFallback
+      ? {
+          configured: true,
+          provider: runtimeConfig.externalFallback.provider,
+          baseUrl: sanitizePublicProviderBaseUrl(
+            runtimeConfig.externalFallback.baseUrl,
+          ),
+          model: runtimeConfig.externalFallback.model,
+          streamMode: runtimeConfig.externalFallback.streamMode,
+        }
+      : null,
+    externalProviders: getPublicExternalProviderInfos(),
+  };
+}
+
 export async function handleChatCompletions(
   req: Request,
   res: Response,
@@ -145,7 +203,30 @@ export async function handleChatCompletions(
   const requestId = uuidv4().replace(/-/g, "").slice(0, 24);
   const requestedAgentId =
     typeof req.params?.agentId === "string" ? req.params.agentId : undefined;
-  const rawBody = (req.body ?? {}) as OpenAIChatRequest & Record<string, unknown>;
+  const rawBody = (req.body ?? {}) as InternalChatRequest;
+  const conversationId = resolveConversationId(req, rawBody, requestId);
+  const conversationPolicy = resolveConversationPolicy(
+    req,
+    rawBody,
+    runtimeConfig.sameConversationPolicy,
+  );
+  const arrivalSequence =
+    conversationRequestQueue.reserveSequence(conversationId);
+  const requestAbort = new AbortController();
+  const abortRequest = (): void => {
+    if (!res.writableEnded) {
+      requestAbort.abort("client_disconnected");
+    }
+  };
+  const cleanupRequestListeners = (): void => {
+    req.removeListener?.("aborted", abortRequest);
+    res.removeListener?.("close", abortRequest);
+    res.removeListener?.("finish", cleanupRequestListeners);
+  };
+  req.once?.("aborted", abortRequest);
+  res.once?.("close", abortRequest);
+  res.once?.("finish", cleanupRequestListeners);
+  setRequestIdentityHeaders(res, requestId, conversationId);
   if (
     !rawBody.messages ||
     !Array.isArray(rawBody.messages) ||
@@ -188,7 +269,7 @@ export async function handleChatCompletions(
     explicitAgentId: requestedAgentId,
     defaultAgentId: runtimeConfig.defaultAgent,
   });
-  const body = effectiveRequest as OpenAIChatRequest & Record<string, unknown>;
+  const body = effectiveRequest as InternalChatRequest;
   const stream = body.stream === true;
   const requestedModel = body.model ? String(body.model) : undefined;
   const externalRequestedProvider = getExternalProviderForModel(requestedModel);
@@ -208,29 +289,8 @@ export async function handleChatCompletions(
     return;
   }
 
-  const conversationId = (body.user as string) || requestId;
-  if (runtimeConfig.sameConversationPolicy === "latest-wins") {
-    conversationRequestQueue.applyLatestWins(conversationId, requestId);
-  }
-
   const startTime = Date.now();
   const queueDepth = conversationRequestQueue.getQueueDepth(conversationId);
-
-  if (queueDepth >= MAX_QUEUE_DEPTH) {
-    conversationRequestQueue.logBlockedRequest(
-      conversationId,
-      requestId,
-      queueDepth,
-    );
-    res.status(429).json({
-      error: {
-        message: `Too many queued requests for this conversation (${queueDepth}). Please wait for current requests to complete.`,
-        type: "rate_limit_error",
-        code: "queue_full",
-      },
-    });
-    return;
-  }
 
   if (externalRequestedProvider) {
     const resolvedExternalModel =
@@ -258,6 +318,10 @@ export async function handleChatCompletions(
       queueDepth,
       startTime,
       resolvedModel: resolvedExternalModel,
+      sequence: arrivalSequence,
+      policy: conversationPolicy,
+      signal: requestAbort.signal,
+      idempotencyKey: resolveIdempotencyKey(req),
     });
     return;
   }
@@ -324,6 +388,24 @@ export async function handleChatCompletions(
   );
   const baseTimeout = getModelTimeout(resolvedModel.id);
   const hardTimeout = reasoning.active ? baseTimeout * 3 : baseTimeout;
+  if (
+    !beginDurableTurn({
+      res,
+      requestId,
+      conversationId,
+      parentResponseId:
+        typeof body.metadata?.previous_response_id === "string"
+          ? body.metadata.previous_response_id
+          : undefined,
+      model: resolvedModel.id,
+      provider: "claude-cli",
+      input: readLastUserText(body.messages),
+      idempotencyKey: resolveIdempotencyKey(req),
+      stream,
+    })
+  ) {
+    return;
+  }
 
   log("request.start", {
     requestId,
@@ -342,20 +424,24 @@ export async function handleChatCompletions(
   });
 
   try {
-    await conversationRequestQueue.enqueue(
+    await conversationRequestQueue.submit(
       conversationId,
       requestId,
       async () => {
+        conversationStore.markTurnRunning(requestId);
         const activeRequest = conversationRequestQueue.registerActiveRequest(
           conversationId,
           requestId,
           stream,
         );
         try {
-          const { sessionId, isResume } = sessionManager.getOrCreate(
-            conversationId,
-            resolvedModel.id,
-          );
+          const parentCheckpoint = body[responseParentCheckpoint];
+          const { sessionId, isResume } = parentCheckpoint
+            ? { sessionId: parentCheckpoint.sessionId, isResume: true }
+            : sessionManager.getOrCreate(
+                conversationId,
+                resolvedModel.id,
+              );
 
           // Phase 5d: Log session context size for token accounting
           if (isResume) {
@@ -371,28 +457,29 @@ export async function handleChatCompletions(
           conversationStore.ensureConversation(
             conversationId,
             resolvedModel.id,
-            sessionId,
           );
-          const messages = body.messages as Array<{
-            role: string;
-            content: string;
-          }>;
-          const lastUserMsg = messages.filter((m) => m.role === "user").pop();
-          if (lastUserMsg) {
-            const content =
-              typeof lastUserMsg.content === "string"
-                ? lastUserMsg.content
-                : JSON.stringify(lastUserMsg.content);
-            conversationStore.addMessage(conversationId, "user", content);
-          }
-
-          const cliInput = openaiToCli(
-            body as unknown as Parameters<typeof openaiToCli>[0],
-            isResume,
+          const requestWithCommittedHistory =
+            mergeCommittedConversationMessages(
+              body,
+              conversationStore.getMessages(conversationId),
+            );
+          const freshCliInput = openaiToCli(
+            requestWithCommittedHistory,
+            false,
             resolvedModel.alias,
           );
+          const cliInput = isResume
+            ? openaiToCli(
+                body as unknown as Parameters<typeof openaiToCli>[0],
+                true,
+                resolvedModel.alias,
+              )
+            : freshCliInput;
           cliInput.sessionId = sessionId;
           cliInput.isResume = isResume;
+          cliInput.forkSession = isResume;
+          cliInput._freshPrompt = freshCliInput.prompt;
+          cliInput._freshSystemPrompt = freshCliInput.systemPrompt;
           cliInput._conversationId = conversationId;
           cliInput._startTime = startTime;
           cliInput.reasoningMode = reasoning.mode;
@@ -422,15 +509,61 @@ export async function handleChatCompletions(
           activeRequest.clear();
         }
       },
-      hardTimeout,
+      {
+        hardTimeoutMs: hardTimeout,
+        sequence: arrivalSequence,
+        policy: conversationPolicy,
+        signal: requestAbort.signal,
+        maxQueueDepth: MAX_QUEUE_DEPTH,
+      },
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     logError("request.error", error, { requestId, conversationId });
     if (error instanceof RequestCancelledError) {
+      conversationStore.finishTurn(
+        requestId,
+        error.proxyError.code === "request_superseded"
+          ? "superseded"
+          : "cancelled",
+        { reason: error.proxyError.message },
+      );
       respondWithError(res, error.proxyError, stream, requestId);
       return;
     }
+    if (error instanceof QueueFullError) {
+      conversationRequestQueue.logBlockedRequest(
+        conversationId,
+        requestId,
+        error.depth,
+      );
+      conversationStore.finishTurn(requestId, "failed", {
+        reason: error.message,
+      });
+      if (!res.headersSent) {
+        res.status(429).json({
+          error: {
+            message: `${error.message} Please wait for current requests to complete.`,
+            type: "rate_limit_error",
+            code: error.code,
+          },
+        });
+      }
+      return;
+    }
+    if (/^Queue timeout after /.test(message)) {
+      conversationStore.finishTurn(requestId, "timed_out", { reason: message });
+      if (!res.headersSent) {
+        sendJsonError(res, {
+          status: 504,
+          message,
+          type: "timeout_error",
+          code: "queue_wait_timeout",
+        });
+      }
+      return;
+    }
+    conversationStore.finishTurn(requestId, "failed", { reason: message });
     if (!res.headersSent) {
       sendJsonError(res, {
         status: 500,
@@ -504,11 +637,99 @@ function buildCapabilitiesPayload(
 ): Record<string, unknown> {
   const agents = listBuiltinAgents();
   const availableModels = getAdvertisedModelIds(availability);
-  const adaptiveModels = availableModels.filter((model) =>
+  const externalProviders = getConfiguredExternalProviders();
+  const externalModelIds = new Set(
+    externalProviders.flatMap((provider) =>
+      provider.getModelDescriptors().map((model) => model.id),
+    ),
+  );
+  const claudeModels = availableModels.filter(
+    (model) => !externalModelIds.has(model),
+  );
+  const adaptiveModels = claudeModels.filter((model) =>
     supportsAdaptiveReasoningModel(model),
   );
-  const fixedBudgetModels = availableModels.filter(
+  const fixedBudgetModels = claudeModels.filter(
     (model) => !supportsAdaptiveReasoningModel(model),
+  );
+  const modelCatalog: Array<Record<string, unknown>> = [];
+  const seenCatalogModels = new Set<string>();
+
+  for (const model of availability?.available ?? []) {
+    if (seenCatalogModels.has(model.id)) continue;
+    seenCatalogModels.add(model.id);
+    modelCatalog.push({
+      id: model.id,
+      alias: model.alias,
+      provider: "anthropic",
+      transport: "claude-cli",
+      availability: "available",
+      timeoutMs: getModelTimeout(model.id),
+      capabilities: {
+        chatCompletions: true,
+        streaming: true,
+        reasoning: true,
+        adaptiveReasoning: supportsAdaptiveReasoningModel(model.id),
+        tools: false,
+        vision: false,
+        structuredOutputs: false,
+      },
+    });
+  }
+  for (const entry of availability?.unavailable ?? []) {
+    if (seenCatalogModels.has(entry.definition.id)) continue;
+    seenCatalogModels.add(entry.definition.id);
+    modelCatalog.push({
+      id: entry.definition.id,
+      alias: entry.definition.alias,
+      provider: "anthropic",
+      transport: "claude-cli",
+      availability: "unavailable",
+      error: {
+        code: entry.error.code,
+        message: entry.error.message,
+      },
+      timeoutMs: entry.definition.timeoutMs,
+      capabilities: {
+        chatCompletions: true,
+        streaming: true,
+        reasoning: true,
+        adaptiveReasoning: supportsAdaptiveReasoningModel(
+          entry.definition.id,
+        ),
+        tools: false,
+        vision: false,
+        structuredOutputs: false,
+      },
+    });
+  }
+  for (const provider of externalProviders) {
+    const info = provider.getPublicInfo();
+    const providerAvailability = provider.getAvailability();
+    for (const model of provider.getModelDescriptors()) {
+      if (seenCatalogModels.has(model.id)) continue;
+      seenCatalogModels.add(model.id);
+      const modelState = resolveExternalModelAvailability(
+        model.id,
+        providerAvailability,
+      );
+      modelCatalog.push({
+        id: model.id,
+        provider: info?.provider ?? model.ownedBy,
+        transport: info?.transport ?? "openai-compatible",
+        availability: modelState,
+        checkedAt: providerAvailability.checkedAt ?? null,
+        error:
+          modelState === "unavailable"
+            ? providerAvailability.error ?? "Provider probe failed"
+            : undefined,
+        timeoutMs: model.timeoutMs,
+        capabilities: model.capabilities,
+      });
+    }
+  }
+  const catalogCapabilities = modelCatalog.map((model) =>
+    model.capabilities as Record<string, unknown>,
   );
 
   return {
@@ -526,8 +747,11 @@ function buildCapabilitiesPayload(
       responses: true,
       streamingChatCompletions: true,
       streamingResponses: false,
-      tools: false,
-      structuredOutputs: false,
+      tools: catalogCapabilities.some((entry) => entry.tools === true),
+      structuredOutputs: catalogCapabilities.some(
+        (entry) => entry.structuredOutputs === true,
+      ),
+      vision: catalogCapabilities.some((entry) => entry.vision === true),
       mcpServer: false,
     },
     agents: {
@@ -555,8 +779,12 @@ function buildCapabilitiesPayload(
     },
     models: {
       available: availableModels,
+      acceptedSelectors: getAcceptedClaudeModelSelectors(),
+      catalog: modelCatalog,
     },
     externalProviders: getPublicExternalProviderInfos(),
+    externalProviderAvailability: getExternalProviderAvailability(),
+    lastFeatureScan: getLastFeatureScan(),
     cli: availability?.cli ?? null,
   };
 }
@@ -573,6 +801,88 @@ export async function handleCapabilities(
     /* surface whatever static capability data we still have */
   }
   res.json(buildCapabilitiesPayload(availability));
+}
+
+export async function handleRefreshFeatures(
+  _req: Request,
+  res: Response,
+): Promise<void> {
+  try {
+    res.json({
+      object: "feature_scan",
+      ...(await scanAvailableFeatures()),
+    });
+  } catch (error) {
+    sendJsonError(res, {
+      status: 503,
+      type: "server_error",
+      code: "feature_scan_failed",
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+export function handleCancelRequest(req: Request, res: Response): void {
+  const requestId =
+    typeof req.params?.requestId === "string" ? req.params.requestId.trim() : "";
+  if (!requestId) {
+    res.status(400).json({
+      error: {
+        message: "requestId is required",
+        type: "invalid_request_error",
+        code: "invalid_request_id",
+      },
+    });
+    return;
+  }
+  if (
+    !conversationRequestQueue.cancelRequest(
+      requestId,
+      "cancelled_via_request_api",
+    )
+  ) {
+    res.status(404).json({
+      error: {
+        message: `Active or queued request '${requestId}' was not found.`,
+        type: "invalid_request_error",
+        code: "request_not_found",
+      },
+    });
+    return;
+  }
+  conversationStore.finishTurn(requestId, "cancelled", {
+    reason: "cancelled_via_request_api",
+  });
+  res.status(202).json({
+    id: requestId,
+    object: "request.cancellation",
+    status: "cancelling",
+  });
+}
+
+export function handleResetConversation(req: Request, res: Response): void {
+  const conversationId =
+    typeof req.params?.conversationId === "string"
+      ? req.params.conversationId.trim()
+      : "";
+  if (!conversationId) {
+    res.status(400).json({
+      error: {
+        message: "conversationId is required",
+        type: "invalid_request_error",
+        code: "invalid_conversation_id",
+      },
+    });
+    return;
+  }
+  const reset = sessionManager.delete(conversationId);
+  res.json({
+    id: conversationId,
+    object: "conversation.reset",
+    reset,
+    message:
+      "The next turn will start from a fresh provider session. Stored transcript history is retained.",
+  });
 }
 
 export function handleAgents(_req: Request, res: Response): void {
@@ -615,10 +925,23 @@ export async function handleResponses(
     });
     return;
   }
+  if (!responsesInputHasText(body.input)) {
+    res.status(400).json({
+      error: {
+        message: "input is required and must contain at least one text item",
+        type: "invalid_request_error",
+        code: "invalid_input",
+      },
+    });
+    return;
+  }
 
-  const previousConversationId = responseConversationStore.get(
-    body.previous_response_id,
-  );
+  const previousTurn = body.previous_response_id
+    ? conversationStore.getTurnByResponseId(body.previous_response_id)
+    : undefined;
+  const previousConversationId =
+    previousTurn?.conversation_id ||
+    responseConversationStore.get(body.previous_response_id);
   if (body.previous_response_id && !previousConversationId) {
     res.status(400).json({
       error: {
@@ -631,9 +954,65 @@ export async function handleResponses(
   }
 
   const responseSeed = uuidv4().replace(/-/g, "").slice(0, 24);
-  const conversationId =
-    previousConversationId || body.user || `respconv_${responseSeed}`;
-  const chatRequest = responsesToChatRequest(body, conversationId);
+  // A response node is a branchable checkpoint. Unless the caller supplies an
+  // explicit conversation id, give each child its own queue/session head so
+  // parallel siblings cannot cancel or contaminate one another.
+  const conversationId = resolveConversationId(
+    req,
+    body as unknown as Record<string, unknown>,
+    `respconv_${responseSeed}`,
+    "responses",
+  );
+  const durableCheckpoint = body.previous_response_id
+    ? conversationStore.getResponseCheckpoint(body.previous_response_id)
+    : undefined;
+  const lineageMessages = body.previous_response_id && previousTurn
+    ? conversationStore
+        .getResponseLineage(body.previous_response_id)
+        .flatMap((turn) => {
+          const messages: OpenAIChatRequest["messages"] = [];
+          if (turn.input !== null) {
+            messages.push({ role: "user", content: turn.input });
+          }
+          if (turn.output !== null) {
+            messages.push({ role: "assistant", content: turn.output });
+          }
+          return messages;
+        })
+    : undefined;
+  // In-memory-only response mappings predate durable turn checkpoints. Keep a
+  // narrow legacy fallback for those rows, while durable responses always use
+  // their exact immutable snapshot/lineage rather than the conversation head.
+  const legacyMessages =
+    previousConversationId && !previousTurn
+      ? conversationStore
+          .getMessages(previousConversationId)
+          .filter(
+            (message): message is typeof message & {
+              role: "system" | "developer" | "user" | "assistant";
+            } =>
+              ["system", "developer", "user", "assistant"].includes(
+                message.role,
+              ),
+          )
+          .map((message) => ({
+            role: message.role,
+            content: message.content,
+          }))
+      : [];
+  const previousMessages =
+    durableCheckpoint?.map((message) => ({ ...message })) ||
+    lineageMessages ||
+    legacyMessages;
+  const chatRequest = responsesToChatRequest(
+    body,
+    conversationId,
+    previousMessages,
+  );
+  chatRequest.metadata = {
+    ...(chatRequest.metadata ?? {}),
+    previous_response_id: body.previous_response_id,
+  };
   if (
     !Array.isArray(chatRequest.messages) ||
     chatRequest.messages.length === 0 ||
@@ -654,6 +1033,41 @@ export async function handleResponses(
     return;
   }
 
+  const targetIsExternal = Boolean(getExternalProviderForModel(body.model));
+  const conversationAlreadyExists = Boolean(
+    conversationStore.getConversation(conversationId),
+  );
+  if (
+    previousConversationId &&
+    previousConversationId !== conversationId &&
+    !conversationAlreadyExists
+  ) {
+    conversationStore.ensureConversation(
+      conversationId,
+      previousTurn?.model || body.model,
+    );
+    for (const message of previousMessages) {
+      const content =
+        typeof message.content === "string"
+          ? message.content
+          : JSON.stringify(message.content);
+      conversationStore.addMessage(conversationId, message.role, content);
+    }
+  }
+  // Resume a Claude response branch directly from its immutable parent
+  // checkpoint. This is request-local: retries and failed branches cannot
+  // regress the committed session head for either conversation.
+  if (
+    !targetIsExternal &&
+    previousTurn?.provider === "claude-cli" &&
+    previousTurn.session_id
+  ) {
+    (chatRequest as InternalChatRequest)[responseParentCheckpoint] = {
+      sessionId: previousTurn.session_id,
+      model: previousTurn.model || body.model || "sonnet",
+    };
+  }
+
   const wrappedReq = Object.assign(Object.create(req), {
     body: chatRequest,
   }) as Request;
@@ -662,8 +1076,34 @@ export async function handleResponses(
     if (payload && typeof payload === "object" && "error" in payload) {
       return originalJson(payload);
     }
-    const responseId = `resp_${responseSeed}`;
+    const originalRequestId = res.getHeader("X-Original-Request-Id");
+    const currentRequestId = res.getHeader("X-Request-Id");
+    const innerRequestId =
+      typeof originalRequestId === "string"
+        ? originalRequestId
+        : typeof currentRequestId === "string"
+          ? currentRequestId
+          : undefined;
+    const storedTurn = innerRequestId
+      ? conversationStore.getTurn(innerRequestId)
+      : undefined;
+    // Idempotent retries must return the same durable Responses checkpoint.
+    // Generating a fresh id here would orphan the original branch mapping.
+    const responseId = storedTurn?.response_id || `resp_${responseSeed}`;
     responseConversationStore.remember(responseId, conversationId);
+    if (innerRequestId) {
+      const assistantContent =
+        (payload as OpenAIChatResponse).choices?.[0]?.message.content || "";
+      conversationStore.rememberTurnResponse(
+        innerRequestId,
+        responseId,
+        body.previous_response_id,
+        [
+          ...chatRequest.messages.map((message) => ({ ...message })),
+          { role: "assistant", content: assistantContent },
+        ],
+      );
+    }
     return originalJson(
       chatToResponsesResponse(payload as OpenAIChatResponse, {
         responseId,
@@ -688,6 +1128,15 @@ export async function handleHealth(
     conversationRequestQueue.getQueueEntries(),
   );
   const executionStats = getExecutionStats();
+  const externalProviderAvailability = getExternalProviderAvailability();
+  const healthModels = buildHealthModelSummary(
+    snapshot.availability,
+    getPublicExternalModelList().map((model) => model.id),
+    externalProviderAvailability,
+  );
+  const publicQueueStatus = buildPublicHealthQueueStatus(
+    queueSnapshot.queueStatus,
+  );
 
   if (snapshot.authUnhealthy) {
     res.status(503);
@@ -709,40 +1158,19 @@ export async function handleHealth(
       active: snapshot.activePids.length,
       pids: snapshot.activePids,
     },
-    config: {
-      sameConversationPolicy: runtimeConfig.sameConversationPolicy,
-      maxConcurrentRequests: runtimeConfig.maxConcurrentRequests,
-      debugQueues: runtimeConfig.debugQueues,
-      enableAdminApi: runtimeConfig.enableAdminApi,
-      defaultAgent: runtimeConfig.defaultAgent ?? null,
-      modelFallbacks: runtimeConfig.modelFallbacks,
-      geminiCliFallback: runtimeConfig.geminiCliFallback,
-      externalFallback: runtimeConfig.externalFallback,
-      externalProviders: getPublicExternalProviderInfos(),
-    },
+    config: buildPublicRuntimeConfig(),
     auth: snapshot.availability?.auth ?? undefined,
-    models: snapshot.availability
-      ? {
-          checkedAt: new Date(snapshot.availability.checkedAt).toISOString(),
-          available: snapshot.availability.available.map((model) => model.id),
-          unavailable: snapshot.availability.unavailable.map((entry) => ({
-            id: entry.definition.id,
-            code: entry.error.code,
-            message: entry.error.message,
-          })),
-        }
-      : undefined,
-    capabilities: snapshot.availability
-      ? buildCapabilitiesSummary(snapshot.availability)
-      : buildCapabilitiesPayload(null),
+    models: healthModels,
+    externalProviderAvailability,
+    capabilities: buildCapabilitiesPayload(snapshot.availability),
     pool: snapshot.poolStatus,
     store: snapshot.storeStats,
     metrics: snapshot.healthMetrics,
     recentErrors: snapshot.recentErrors,
     stallDetections: executionStats.stallDetections,
     queues:
-      Object.keys(queueSnapshot.queueStatus).length > 0
-        ? queueSnapshot.queueStatus
+      Object.keys(publicQueueStatus).length > 0
+        ? publicQueueStatus
         : undefined,
   });
 }

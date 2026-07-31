@@ -16,11 +16,16 @@ const state = {
   logPaused: false,
   eventSource: null,
   detailRequestId: 0,
+  detailLoading: false,
+  detailError: null,
 };
 
 const dom = {
   connectionChip: document.getElementById("connectionChip"),
   connectionLabel: document.getElementById("connectionLabel"),
+  offlineBanner: document.getElementById("offlineBanner"),
+  offlineMessage: document.getElementById("offlineMessage"),
+  retryConnectionButton: document.getElementById("retryConnectionButton"),
   routeSummary: document.getElementById("routeSummary"),
   activeSummary: document.getElementById("activeSummary"),
   queueSummary: document.getElementById("queueSummary"),
@@ -77,6 +82,9 @@ const dom = {
   detailTitle: document.getElementById("detailTitle"),
   detailRoute: document.getElementById("detailRoute"),
   detailTimer: document.getElementById("detailTimer"),
+  cancelRequestButton: document.getElementById("cancelRequestButton"),
+  resetSessionButton: document.getElementById("resetSessionButton"),
+  openInLabButton: document.getElementById("openInLabButton"),
   detailMeta: document.getElementById("detailMeta"),
   conversationDetail: document.getElementById("conversationDetail"),
   followLogsButton: document.getElementById("followLogsButton"),
@@ -222,11 +230,16 @@ function statusBadgeState(status) {
   return "idle";
 }
 
-function setConnected(connected) {
+function setConnected(connected, message = "") {
   state.connected = connected;
   document.body.dataset.connected = connected ? "true" : "false";
   dom.connectionChip.dataset.state = connected ? "ok" : "alarm";
   dom.connectionLabel.textContent = connected ? "Link live" : "Retrying";
+  dom.offlineBanner.hidden = connected;
+  if (!connected) {
+    dom.offlineMessage.textContent =
+      message || "Showing the last snapshot while the live link retries.";
+  }
 }
 
 function updateClock() {
@@ -350,7 +363,7 @@ function inferProviderId(params) {
     return explicit;
   }
 
-  const model = normalizeModelId(params.model);
+  const model = normalizeModelId(params.startLog?.model || params.model);
   const providers = asArray(params.snapshot?.config?.externalProviders);
   const matched = providers.find((provider) => providerSupportsModel(provider, model));
   if (matched) {
@@ -377,7 +390,8 @@ function inferProviderId(params) {
 function buildRouteInfo(params) {
   const providerId = inferProviderId(params);
   const providerName = humanizeProvider(providerId);
-  const modelName = humanizeModel(params.model);
+  const effectiveModel = params.startLog?.model || params.model;
+  const modelName = humanizeModel(effectiveModel);
   const providers = asArray(params.snapshot?.config?.externalProviders);
   const externalProvider = providers.find(
     (provider) => normalizeProviderId(provider.provider) === providerId,
@@ -567,15 +581,15 @@ function buildProviderRows(snapshot) {
     meta: claudeTraffic.active
       ? `${claudeTraffic.active} live`
       : claudeTraffic.queued
-        ? `${claudeTraffic.queued} queued`
-        : claudeTraffic.recent
-          ? `${claudeTraffic.recent} recent`
-          : claudeLoggedIn
-            ? "ready"
-            : "auth down",
+          ? `${claudeTraffic.queued} queued`
+          : claudeTraffic.recent
+            ? `${claudeTraffic.recent} recent`
+            : claudeLoggedIn
+              ? "authenticated"
+              : "auth down",
   });
 
-  externalProviders.forEach((provider, index) => {
+  externalProviders.forEach((provider) => {
     const providerId = normalizeProviderId(provider.provider);
     const stats = providerStats.get(providerId) || {
       recent: 0,
@@ -583,8 +597,8 @@ function buildProviderRows(snapshot) {
       queued: 0,
     };
     rows.push({
-      state: stats.active ? "ok" : stats.queued ? "warn" : "ok",
-      label: index === 0 ? "Fallback" : "Alt",
+      state: stats.active ? "ok" : stats.queued ? "warn" : "",
+      label: "External",
       name: humanizeProvider(provider.provider),
       detail: `${humanizeModel(provider.model)}${
         provider.extraModels?.length
@@ -596,8 +610,8 @@ function buildProviderRows(snapshot) {
         : stats.queued
           ? `${stats.queued} queued`
           : provider.transport === "local-cli"
-            ? "local cli"
-            : "ready",
+            ? "local cli configured"
+            : "configured",
     });
   });
 
@@ -648,21 +662,21 @@ function buildRouteSummary(snapshot) {
 
   if (asArray(availability.available).length > 0 && externalProviders.length > 0) {
     return {
-      label: "Claude primary + fallback",
-      providerMode: "Hybrid",
+      label: "Claude + external routes",
+      providerMode: "Multi-provider",
     };
   }
 
   if (asArray(availability.available).length > 0) {
     return {
-      label: "Claude primary",
+      label: "Claude available",
       providerMode: "Claude",
     };
   }
 
   if (externalProviders.length > 0) {
     return {
-      label: `${humanizeProvider(externalProviders[0].provider)} fallback`,
+      label: `${humanizeProvider(externalProviders[0].provider)} configured`,
       providerMode: humanizeProvider(externalProviders[0].provider),
     };
   }
@@ -967,8 +981,11 @@ function renderTopology(snapshot, latest) {
   const runtime = snapshot?.runtime || {};
   const availability = snapshot?.availability || {};
   const providers = buildProviderRows(snapshot);
-  const providerReadyCount = providers.filter(
+  const providerRouteCount = providers.filter(
     (provider) => provider.state !== "alarm",
+  ).length;
+  const providerHealthyCount = providers.filter(
+    (provider) => provider.state === "ok",
   ).length;
 
   setNodeState(
@@ -1028,16 +1045,16 @@ function renderTopology(snapshot, latest) {
   dom.nodeRuntimeMeta.textContent = `${formatCount(runtime.activeSessions)} sessions, ${formatCount(runtime.activeSubprocesses)} Claude workers, ${formatPercent(latest.cpuPercent, 0)} CPU`;
   setPipeState(
     dom.pipeRuntime,
-    providerReadyCount > 0 && runtime.activeRequests > 0,
-    asArray(availability.unavailable).length > 0 && providerReadyCount === 0,
+    providerRouteCount > 0 && runtime.activeRequests > 0,
+    asArray(availability.unavailable).length > 0 && providerRouteCount === 0,
     buildRouteSummary(snapshot).label,
   );
 
   setNodeState(
     dom.nodeProviders,
-    providerReadyCount > 0 ? "ok" : "alarm",
+    providerHealthyCount > 0 ? "ok" : providerRouteCount > 0 ? "" : "alarm",
   );
-  dom.nodeProvidersValue.textContent = `${formatCount(providerReadyCount)} ready`;
+  dom.nodeProvidersValue.textContent = `${formatCount(providerRouteCount)} routes`;
   dom.nodeProvidersMeta.textContent = buildRouteSummary(snapshot).label;
   dom.providerStack.innerHTML = providers.length
     ? providers
@@ -1120,7 +1137,13 @@ function renderLanes(snapshot) {
       const messageCount = lane.conversation?.messageCount ?? 0;
       const queueDepth = lane.queueState?.queued ?? 0;
       return `
-        <article class="lane-row" data-state="${escapeHtml(lane.status)}">
+        <button
+          class="lane-row"
+          type="button"
+          data-state="${escapeHtml(lane.status)}"
+          data-conversation-id="${escapeHtml(lane.key)}"
+          aria-label="Inspect ${escapeHtml(lane.route.summary)} conversation"
+        >
           <div class="lane-top">
             <strong class="lane-title">${escapeHtml(lane.route.summary)}</strong>
             <span class="status-badge" data-state="${escapeHtml(statusBadgeState(lane.status))}">${escapeHtml(lane.status)}</span>
@@ -1136,10 +1159,18 @@ function renderLanes(snapshot) {
             }
             <span class="meta-badge">${escapeHtml(shortId(lane.key, 8))}</span>
           </div>
-        </article>
+        </button>
       `;
     })
     .join("");
+
+  dom.laneList.querySelectorAll("[data-conversation-id]").forEach((lane) => {
+    lane.addEventListener("click", () => {
+      selectConversation(lane.getAttribute("data-conversation-id"), snapshot, {
+        scroll: true,
+      });
+    });
+  });
 }
 
 function buildLegendChips(items) {
@@ -1286,6 +1317,10 @@ function renderCharts(snapshot) {
   const heapValues = series.map((entry) => entry.heapUsed / (1024 * 1024));
 
   dom.flowCurrent.textContent = `${formatFloat(latest.throughput, 2)} req/s`;
+  dom.flowChart.setAttribute(
+    "aria-label",
+    `Request flow: ${formatFloat(latest.throughput, 2)} requests per second, ${formatFloat(latest.errorRate, 1)} errors per minute, ${formatFloat(latest.retryRate, 1)} retries per minute.`,
+  );
   dom.flowLegend.innerHTML = buildLegendChips([
     { label: "Req/s", value: formatFloat(latest.throughput, 2), color: "#36c8ff" },
     { label: "Err/min", value: formatFloat(latest.errorRate, 1), color: "#ff8d69" },
@@ -1304,6 +1339,10 @@ function renderCharts(snapshot) {
   dom.latencyCurrent.textContent = latest.p95
     ? `${formatDuration(latest.p95)} p95`
     : "no samples";
+  dom.latencyChart.setAttribute(
+    "aria-label",
+    `Response latency: p50 ${latest.p50 ? formatDuration(latest.p50) : "not available"}, p95 ${latest.p95 ? formatDuration(latest.p95) : "not available"}, time to first byte p95 ${latest.ttfb95 ? formatDuration(latest.ttfb95) : "not available"}.`,
+  );
   dom.latencyLegend.innerHTML = buildLegendChips([
     { label: "P50", value: latest.p50 ? formatDuration(latest.p50) : "n/a", color: "#36c8ff" },
     { label: "P95", value: latest.p95 ? formatDuration(latest.p95) : "n/a", color: "#ff8d69" },
@@ -1322,6 +1361,10 @@ function renderCharts(snapshot) {
   });
 
   dom.pressureCurrent.textContent = `${formatCount(latest.activeRequests)} / ${formatCount(latest.queuedRequests)}`;
+  dom.pressureChart.setAttribute(
+    "aria-label",
+    `Request pressure: ${formatCount(latest.activeRequests)} active, ${formatCount(latest.queuedRequests)} queued, ${formatCount(latest.activeSessions)} sessions.`,
+  );
   dom.pressureLegend.innerHTML = buildLegendChips([
     { label: "Active", value: formatCount(latest.activeRequests), color: "#74ffb0" },
     { label: "Queued", value: formatCount(latest.queuedRequests), color: "#ffd66b" },
@@ -1346,6 +1389,10 @@ function renderCharts(snapshot) {
   });
 
   dom.loadCurrent.textContent = `${formatPercent(latest.cpuPercent, 0)} / ${formatMemory(latest.rss)}`;
+  dom.loadChart.setAttribute(
+    "aria-label",
+    `Process load: ${formatPercent(latest.cpuPercent, 0)} CPU, ${formatMemory(latest.rss)} resident memory, ${formatMemory(latest.heapUsed)} heap.`,
+  );
   dom.loadLegend.innerHTML = buildLegendChips([
     { label: "CPU", value: formatPercent(latest.cpuPercent, 0), color: "#36c8ff" },
     { label: "RSS", value: formatMemory(latest.rss), color: "#74ffb0" },
@@ -1364,11 +1411,46 @@ function renderCharts(snapshot) {
 
 function ensureSelectedConversation(snapshot) {
   const conversations = asArray(snapshot?.recentConversations);
-  const exists = conversations.some(
-    (conversation) => conversation.conversationId === state.selectedConversationId,
+  const queueConversations = asArray(snapshot?.queue?.conversations);
+  const activeRequests = asArray(snapshot?.queue?.activeRequests);
+  const exists = [...conversations, ...queueConversations, ...activeRequests].some(
+    (conversation) =>
+      conversation.conversationId === state.selectedConversationId,
   );
   if (exists) return;
-  state.selectedConversationId = conversations[0]?.conversationId || null;
+  const nextConversationId = conversations[0]?.conversationId || null;
+  if (nextConversationId !== state.selectedConversationId) {
+    state.detailRequestId += 1;
+    state.conversationDetail = null;
+    state.detailError = null;
+    state.detailLoading = false;
+  }
+  state.selectedConversationId = nextConversationId;
+}
+
+function selectConversation(conversationId, snapshot = state.snapshot, options = {}) {
+  if (!conversationId || !snapshot) return;
+  const hasStoredTranscript = asArray(snapshot?.recentConversations).some(
+    (conversation) => conversation.conversationId === conversationId,
+  );
+  state.detailRequestId += 1;
+  state.selectedConversationId = conversationId;
+  state.conversationDetail = null;
+  state.detailError = null;
+  state.detailLoading = hasStoredTranscript;
+  renderConversations(snapshot);
+  renderConversationDetail(snapshot);
+  if (hasStoredTranscript) {
+    loadConversationDetail(conversationId);
+  }
+  if (options.scroll) {
+    document.querySelector(".conversations-panel")?.scrollIntoView({
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+        ? "auto"
+        : "smooth",
+      block: "start",
+    });
+  }
 }
 
 function renderConversations(snapshot) {
@@ -1402,11 +1484,13 @@ function renderConversations(snapshot) {
           : `idle ${formatAge(conversation.idleMs)}`;
 
       return `
-        <article
-          tabindex="0"
+        <button
+          type="button"
           class="conversation-row${selected ? " is-selected" : ""}"
           data-status="${escapeHtml(conversation.status)}"
           data-conversation-id="${escapeHtml(conversation.conversationId)}"
+          aria-pressed="${selected ? "true" : "false"}"
+          aria-label="Inspect ${escapeHtml(route.summary)} conversation"
         >
           <div class="conversation-top">
             <div class="conversation-route">
@@ -1422,25 +1506,15 @@ function renderConversations(snapshot) {
             <span class="meta-badge">${escapeHtml(formatCount(conversation.messageCount))} msgs</span>
             <span class="meta-badge">${escapeHtml(shortId(conversation.conversationId, 8))}</span>
           </div>
-        </article>
+        </button>
       `;
     })
     .join("");
 
   Array.from(dom.conversationList.querySelectorAll(".conversation-row")).forEach(
     (row) => {
-      const selectConversation = () => {
-        state.selectedConversationId = row.getAttribute("data-conversation-id");
-        renderConversations(snapshot);
-        loadConversationDetail(state.selectedConversationId);
-      };
-
-      row.addEventListener("click", selectConversation);
-      row.addEventListener("keydown", (event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          selectConversation();
-        }
+      row.addEventListener("click", () => {
+        selectConversation(row.getAttribute("data-conversation-id"), snapshot);
       });
     },
   );
@@ -1448,15 +1522,39 @@ function renderConversations(snapshot) {
 
 function renderConversationDetail(snapshot) {
   const detail = state.conversationDetail;
-  const selectedSummary = asArray(snapshot?.recentConversations).find(
+  let selectedSummary = asArray(snapshot?.recentConversations).find(
     (conversation) => conversation.conversationId === state.selectedConversationId,
   ) || null;
+  if (!selectedSummary && state.selectedConversationId) {
+    const queueEntry = asArray(snapshot?.queue?.conversations).find(
+      (conversation) =>
+        conversation.conversationId === state.selectedConversationId,
+    );
+    if (queueEntry) {
+      const startLog = findRecentLog(
+        state.selectedConversationId,
+        (entry) => entry.event === "request.start",
+      );
+      selectedSummary = {
+        conversationId: state.selectedConversationId,
+        model: startLog?.model || null,
+        status: queueEntry.active ? "active" : "queued",
+        activeDurationMs: queueEntry.activeDurationMs,
+        queueWaitMs: queueEntry.waitMs,
+        idleMs: 0,
+        messageCount: 0,
+      };
+    }
+  }
 
   if (!selectedSummary) {
     dom.detailTitle.textContent = "Select a chat";
     dom.detailRoute.textContent = "no route";
     dom.detailTimer.textContent = "idle";
     dom.detailMeta.innerHTML = `<div class="empty-inline">No chat selected</div>`;
+    dom.cancelRequestButton.hidden = true;
+    dom.resetSessionButton.hidden = true;
+    dom.openInLabButton.hidden = true;
     dom.conversationDetail.innerHTML = `
       <div class="empty-inline">Select a row to inspect transcript and runtime context</div>
     `;
@@ -1481,6 +1579,39 @@ function renderConversationDetail(snapshot) {
   dom.detailTitle.textContent = route.modelName;
   dom.detailRoute.textContent = route.summary;
   dom.detailTimer.textContent = timer;
+  const activeRequest = asArray(snapshot?.queue?.activeRequests).find(
+    (request) =>
+      request.conversationId === selectedSummary.conversationId,
+  );
+  const queueState = asArray(snapshot?.queue?.conversations).find(
+    (conversation) =>
+      conversation.conversationId === selectedSummary.conversationId,
+  );
+  const queuedRequestId = asArray(queueState?.queuedRequestIds)[0] || "";
+  const cancellableRequestId = activeRequest?.requestId || queuedRequestId;
+  const cancellationState = activeRequest?.requestId
+    ? "active"
+    : queuedRequestId
+      ? "queued"
+      : "";
+  dom.cancelRequestButton.hidden = !cancellableRequestId;
+  dom.cancelRequestButton.dataset.requestId = cancellableRequestId;
+  dom.cancelRequestButton.dataset.requestState = cancellationState;
+  dom.cancelRequestButton.textContent =
+    cancellationState === "queued" ? "Cancel queued request" : "Cancel request";
+  dom.cancelRequestButton.setAttribute(
+    "aria-label",
+    cancellationState === "queued"
+      ? "Cancel the oldest queued request for this conversation"
+      : "Cancel the active request for this conversation",
+  );
+  dom.resetSessionButton.hidden =
+    snapshot?.config?.enableAdminApi !== true || !detail?.session;
+  dom.resetSessionButton.dataset.conversationId =
+    selectedSummary.conversationId;
+  dom.openInLabButton.hidden = false;
+  dom.openInLabButton.dataset.conversationId =
+    selectedSummary.conversationId;
   dom.detailMeta.innerHTML = [
     {
       label: "Status",
@@ -1519,9 +1650,36 @@ function renderConversationDetail(snapshot) {
     )
     .join("");
 
+  if (state.detailLoading) {
+    dom.conversationDetail.innerHTML = `
+      <div class="empty-inline" data-state="loading">Loading transcript and session context…</div>
+    `;
+    return;
+  }
+
+  if (state.detailError) {
+    dom.conversationDetail.innerHTML = `
+      <div class="empty-inline" data-state="error">
+        <strong>Transcript unavailable</strong>
+        <span>${escapeHtml(state.detailError)}</span>
+        <button class="toolbar-button" id="retryConversationButton" type="button">Retry</button>
+      </div>
+    `;
+    document
+      .getElementById("retryConversationButton")
+      ?.addEventListener("click", () => {
+        loadConversationDetail(state.selectedConversationId);
+      });
+    return;
+  }
+
   if (!detail || !Array.isArray(detail.messages) || !detail.messages.length) {
     dom.conversationDetail.innerHTML = `
-      <div class="empty-inline">Transcript not loaded yet</div>
+      <div class="empty-inline">${
+        selectedSummary.status === "active" || selectedSummary.status === "queued"
+          ? "Transcript will appear when this turn is stored."
+          : "No stored transcript messages."
+      }</div>
     `;
     return;
   }
@@ -1754,6 +1912,8 @@ function renderLogs() {
 function refreshToolbarState() {
   dom.followLogsButton.classList.toggle("is-active", state.followLogs);
   dom.pauseLogsButton.classList.toggle("is-active", state.logPaused);
+  dom.followLogsButton.setAttribute("aria-pressed", String(state.followLogs));
+  dom.pauseLogsButton.setAttribute("aria-pressed", String(state.logPaused));
 }
 
 function maybeRefreshConversationDetail(snapshot) {
@@ -1770,7 +1930,19 @@ function maybeRefreshConversationDetail(snapshot) {
     return;
   }
   const knownUpdatedAt = asNumber(state.conversationDetail?.conversation?.updated_at);
-  if (!knownUpdatedAt || knownUpdatedAt !== asNumber(summary.updatedAtMs)) {
+  const knownMessageCount = asArray(state.conversationDetail?.messages).length;
+  const latestMessageAt = asArray(state.conversationDetail?.messages)
+    .map((message) => asNumber(message?.created_at))
+    .reduce((latest, value) => Math.max(latest, value), 0);
+  if (
+    !state.detailLoading &&
+    (
+      !knownUpdatedAt ||
+      knownUpdatedAt !== asNumber(summary.updatedAtMs) ||
+      knownMessageCount !== Math.min(asNumber(summary.messageCount), DETAIL_LIMIT) ||
+      latestMessageAt !== asNumber(summary.lastMessageAtMs)
+    )
+  ) {
     loadConversationDetail(state.selectedConversationId);
   }
 }
@@ -1843,22 +2015,53 @@ function fetchJson(url) {
   });
 }
 
+async function fetchAction(url, options = {}, allowTokenPrompt = false) {
+  const headers = new Headers(options.headers || {});
+  const storedToken = sessionStorage.getItem("claude-proxy:admin-token");
+  if (storedToken) headers.set("X-Admin-Token", storedToken);
+  let response = await fetch(url, { ...options, headers });
+  if (response.status === 403 && allowTokenPrompt) {
+    const token = window.prompt(
+      "This administrative action requires CLAUDE_PROXY_ADMIN_TOKEN:",
+    );
+    if (token) {
+      sessionStorage.setItem("claude-proxy:admin-token", token);
+      headers.set("X-Admin-Token", token);
+      response = await fetch(url, { ...options, headers });
+    }
+  }
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(
+      payload?.error?.message || `Request failed: ${response.status}`,
+    );
+  }
+  return response.json().catch(() => ({}));
+}
+
 function loadConversationDetail(conversationId) {
   if (!conversationId) return;
   state.detailRequestId += 1;
   const requestId = state.detailRequestId;
+  state.detailLoading = true;
+  state.detailError = null;
+  if (state.snapshot) {
+    renderConversationDetail(state.snapshot);
+  }
 
   fetchJson(`/ops/conversations/${encodeURIComponent(conversationId)}?limit=${DETAIL_LIMIT}`)
     .then((detail) => {
       if (requestId !== state.detailRequestId) return;
       state.conversationDetail = detail;
+      state.detailLoading = false;
+      state.detailError = null;
       renderConversationDetail(state.snapshot);
     })
     .catch((error) => {
       if (requestId !== state.detailRequestId) return;
-      dom.conversationDetail.innerHTML = `
-        <div class="empty-inline">Failed to load transcript: ${escapeHtml(error.message)}</div>
-      `;
+      state.detailLoading = false;
+      state.detailError = error.message;
+      renderConversationDetail(state.snapshot);
     });
 }
 
@@ -1875,17 +2078,48 @@ function connectStream() {
   });
 
   source.addEventListener("snapshot", (event) => {
-    const snapshot = JSON.parse(event.data);
-    applySnapshot(snapshot);
+    try {
+      const snapshot = JSON.parse(event.data);
+      applySnapshot(snapshot);
+    } catch {
+      setConnected(false, "A live snapshot could not be decoded. Retrying the stream.");
+    }
   });
 
   source.addEventListener("log", (event) => {
-    handleLiveLog(JSON.parse(event.data));
+    try {
+      handleLiveLog(JSON.parse(event.data));
+    } catch {
+      /* a malformed log entry should not take down the telemetry stream */
+    }
   });
 
   source.addEventListener("error", () => {
-    setConnected(false);
+    setConnected(false, "Showing the last snapshot while the live link retries.");
   });
+}
+
+function refreshConnection() {
+  if (state.eventSource) {
+    state.eventSource.close();
+    state.eventSource = null;
+  }
+  setConnected(false, "Fetching a fresh operator snapshot…");
+  fetchJson("/ops/snapshot")
+    .then((snapshot) => {
+      applySnapshot(snapshot, { logs: snapshot.recentLogs || [] });
+      connectStream();
+    })
+    .catch((error) => {
+      state.logs = [];
+      dom.logStream.innerHTML = `
+        <div class="empty-inline" data-state="error">
+          Failed to load ops snapshot: ${escapeHtml(error.message)}
+        </div>
+      `;
+      setConnected(false, `Snapshot failed: ${error.message}`);
+      dom.connectionLabel.textContent = "Boot failure";
+    });
 }
 
 function bootstrap() {
@@ -1917,20 +2151,52 @@ function bootstrap() {
     renderLogs();
   });
 
-  fetchJson("/ops/snapshot")
-    .then((snapshot) => {
-      applySnapshot(snapshot, { logs: snapshot.recentLogs || [] });
-      connectStream();
-      if (state.selectedConversationId) {
-        loadConversationDetail(state.selectedConversationId);
-      }
-    })
-    .catch((error) => {
-      dom.connectionLabel.textContent = "Boot failure";
-      dom.logStream.innerHTML = `
-        <div class="empty-inline">Failed to load ops snapshot: ${escapeHtml(error.message)}</div>
-      `;
-    });
+  dom.retryConnectionButton.addEventListener("click", refreshConnection);
+  dom.cancelRequestButton.addEventListener("click", async () => {
+    const requestId = dom.cancelRequestButton.dataset.requestId;
+    if (!requestId) return;
+    dom.cancelRequestButton.disabled = true;
+    try {
+      await fetchAction(
+        `/v1/requests/${encodeURIComponent(requestId)}`,
+        { method: "DELETE" },
+      );
+      refreshConnection();
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : String(error));
+    } finally {
+      dom.cancelRequestButton.disabled = false;
+    }
+  });
+  dom.resetSessionButton.addEventListener("click", async () => {
+    const conversationId = dom.resetSessionButton.dataset.conversationId;
+    if (!conversationId) return;
+    dom.resetSessionButton.disabled = true;
+    try {
+      await fetchAction(
+        `/admin/conversations/${encodeURIComponent(conversationId)}/reset`,
+        { method: "POST" },
+        true,
+      );
+      state.detailRequestId += 1;
+      state.conversationDetail = null;
+      refreshConnection();
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : String(error));
+    } finally {
+      dom.resetSessionButton.disabled = false;
+    }
+  });
+  dom.openInLabButton.addEventListener("click", () => {
+    const conversationId = dom.openInLabButton.dataset.conversationId;
+    if (!conversationId) return;
+    sessionStorage.setItem(
+      "claude-proxy:resume-conversation",
+      conversationId,
+    );
+    window.location.assign("/launch#chatLab");
+  });
+  refreshConnection();
 }
 
 bootstrap();

@@ -11,13 +11,16 @@ import { networkInterfaces } from "os";
 import {
   handleAgentDetails,
   handleAgents,
+  handleCancelRequest,
   handleChatCompletions,
   handleCapabilities,
   handleMetrics,
   handleModels,
+  handleResetConversation,
   handleResponses,
   handleHealth,
   handleGetThinkingBudget,
+  handleRefreshFeatures,
   handleSetThinkingBudget,
 } from "./routes.js";
 import {
@@ -35,6 +38,12 @@ import {
 } from "../auth/proactive-refresh.js";
 import "../subprocess/pool.js";
 import "../store/conversation.js";
+import { requireAdminAccess } from "./admin-access.js";
+import {
+  startFeatureScanner,
+  stopFeatureScanner,
+} from "../feature-scanner.js";
+import { sessionManager } from "../session/manager.js";
 
 export interface ServerConfig {
   port: number;
@@ -67,9 +76,10 @@ function getAdvertisedHosts(host: string): string[] {
   return Array.from(advertised);
 }
 
-function createApp(): express.Application {
+export function createApp(): express.Application {
   const app = express();
 
+  app.disable("x-powered-by");
   app.use(express.json({ limit: "10mb" }));
   app.use((req, res, next) => {
     const isOpsRoute =
@@ -95,10 +105,21 @@ function createApp(): express.Application {
 
   app.use((_req, res, next) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader(
+      "Access-Control-Allow-Methods",
+      "GET, POST, PUT, DELETE, OPTIONS",
+    );
     res.setHeader(
       "Access-Control-Allow-Headers",
-      "Content-Type, Authorization, X-Thinking-Budget",
+      [
+        "Content-Type",
+        "Authorization",
+        "Idempotency-Key",
+        "X-Admin-Token",
+        "X-Conversation-Id",
+        "X-Conversation-Policy",
+        "X-Thinking-Budget",
+      ].join(", "),
     );
     next();
   });
@@ -129,12 +150,35 @@ function createApp(): express.Application {
   app.get("/v1/agents/:agentId", handleAgentDetails);
   app.post("/v1/chat/completions", handleChatCompletions);
   app.post("/v1/responses", handleResponses);
+  app.delete("/v1/requests/:requestId", handleCancelRequest);
   app.post("/v1/agents/:agentId/chat/completions", handleChatCompletions);
   app.post("/v1/agents/:agentId/responses", handleResponses);
   if (runtimeConfig.enableAdminApi) {
-    app.get("/admin/thinking-budget", handleGetThinkingBudget);
-    app.post("/admin/thinking-budget", handleSetThinkingBudget);
-    app.put("/admin/thinking-budget", handleSetThinkingBudget);
+    app.get(
+      "/admin/thinking-budget",
+      requireAdminAccess,
+      handleGetThinkingBudget,
+    );
+    app.post(
+      "/admin/thinking-budget",
+      requireAdminAccess,
+      handleSetThinkingBudget,
+    );
+    app.put(
+      "/admin/thinking-budget",
+      requireAdminAccess,
+      handleSetThinkingBudget,
+    );
+    app.post(
+      "/admin/features/refresh",
+      requireAdminAccess,
+      handleRefreshFeatures,
+    );
+    app.post(
+      "/admin/conversations/:conversationId/reset",
+      requireAdminAccess,
+      handleResetConversation,
+    );
   }
 
   app.use((_req, res) => {
@@ -174,6 +218,7 @@ export async function startServer(config: ServerConfig): Promise<Server> {
     console.log("[Server] Already running, returning existing instance");
     return serverInstance;
   }
+  await sessionManager.load();
   const app = createApp();
   return new Promise<Server>((resolve, reject) => {
     serverInstance = createServer(app);
@@ -214,6 +259,7 @@ export async function startServer(config: ServerConfig): Promise<Server> {
       // so unit tests (which never call startServer) don't kick this off.
       if (process.env.NODE_ENV !== "test") {
         startProactiveRefresh();
+        startFeatureScanner();
       }
       resolve(serverInstance!);
     });
@@ -224,6 +270,7 @@ export async function stopServer(): Promise<void> {
   if (!serverInstance) return;
   return new Promise<void>((resolve, reject) => {
     stopProactiveRefresh();
+    stopFeatureScanner();
     serverInstance!.close((err) => {
       if (err) {
         reject(err);

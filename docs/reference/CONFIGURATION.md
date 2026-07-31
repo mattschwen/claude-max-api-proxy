@@ -6,9 +6,12 @@ All runtime configuration is driven by environment variables. Set them **before*
 
 | Variable | Default | Values | What it does |
 | --- | --- | --- | --- |
+| `CLAUDE_PROXY_REQUIRE_CLAUDE` | `true` with no external provider; otherwise `false` | `true`, `false` | Require Claude CLI/auth/model checks to pass before startup. Set `true` for a mixed deployment that must never run without Claude. |
 | `CLAUDE_PROXY_SAME_CONVERSATION_POLICY` | `latest-wins` | `latest-wins`, `queue` | How concurrent requests for the same conversation are handled. |
+| `CLAUDE_PROXY_MAX_CONCURRENT_REQUESTS` | host CPU count, capped at `8` | positive integer | Global request concurrency across independent conversations. Per-conversation ordering still applies. |
 | `CLAUDE_PROXY_DEBUG_QUEUES` | `false` | `true`, `false` | Emit extra structured log events for queue enqueue/drop/block/cancel. |
-| `CLAUDE_PROXY_ENABLE_ADMIN_API` | `false` | `true`, `false` | Mount `GET/POST/PUT /admin/thinking-budget` for live default-thinking changes. |
+| `CLAUDE_PROXY_ENABLE_ADMIN_API` | `false` | `true`, `false` | Mount the live thinking-budget, feature-refresh, and conversation-reset admin routes. |
+| `CLAUDE_PROXY_ADMIN_TOKEN` | _(unset)_ | secret string | Require this bearer token (or `X-Admin-Token`) on admin routes. Without it, admin access is restricted to loopback clients. |
 | `CLAUDE_PROXY_DEFAULT_AGENT` | _(unset)_ | builtin agent id, currently `expert-coder` | Automatically prepends the built-in expert agent profile to every request unless the caller explicitly chooses another built-in agent route/body value. |
 | `CLAUDE_PROXY_SYSTEM_PROMPT_FILE` | _(unset)_ | readable filesystem path | Prepends a global house prompt to each request. The file is cached by modification time, so edits apply without a restart. |
 | `CLAUDE_PROXY_MODEL_FALLBACKS` | _(unset)_ | comma-separated Claude selectors, e.g. `default,haiku` | When the requested model is unavailable, try these selectors in order before returning `model_unavailable`. |
@@ -28,6 +31,7 @@ All runtime configuration is driven by environment variables. Set them **before*
 | `OPENAI_COMPAT_FALLBACK_API_KEY` | _(unset)_ | API key | API key sent as `Authorization: Bearer ...` to the external provider. |
 | `OPENAI_COMPAT_FALLBACK_MODEL` | provider-specific inference | model id | Model ID advertised for explicit routing to the external OpenAI-compatible backend. |
 | `OPENAI_COMPAT_FALLBACK_STREAM_MODE` | `synthetic` | `synthetic`, `passthrough` | How streamed external requests are handled. `synthetic` buffers upstream output and emits proxy-generated OpenAI SSE for maximum client compatibility. |
+| `OPENAI_COMPAT_PROVIDERS_JSON` | _(unset)_ | JSON object or array | Declare multiple named OpenAI-compatible providers, models, timeouts, headers, and per-model capabilities. When set, it replaces the legacy single-provider configuration. |
 | `DEFAULT_THINKING_BUDGET` | _(unset)_ | integer, `off`, `none`, `minimal`, `low`, `medium`, `high`, `auto`, `xhigh`, `max`, `ultracode` | Server-wide fallback thinking budget when the client does not send one. |
 | `DB_PATH` | `~/.claude-proxy-conversations.db` | filesystem path | Location of the SQLite conversation database. |
 | `SESSION_FILE` | `~/.claude-code-cli-sessions.json` | filesystem path | Location of the conversation-to-session mapping file. |
@@ -41,18 +45,32 @@ All runtime configuration is driven by environment variables. Set them **before*
 > `xhigh` maps to an intermediate 48000-token tier. If the installed Claude
 > CLI does not support `--effort xhigh`, the proxy falls back to `max`.
 
-The proxy uses the OpenAI-standard `user` field as a conversation key. When two requests share the same `user`, the policy decides what happens.
+The proxy resolves a conversation key in this order:
+
+1. request body `conversation_id`
+2. request body `metadata.conversation_id`
+3. `X-Conversation-Id` header
+4. legacy OpenAI `user` field
+5. an opaque hash of `Idempotency-Key`, when present
+6. the generated request ID
+
+The response includes `X-Request-Id` and `X-Conversation-Id`, so a client can
+cancel work or continue the exact thread without guessing identifiers. A
+request can override the server default with body
+`"conversation_policy": "interrupt" | "queue"` or the
+`X-Conversation-Policy` header.
 
 ### `latest-wins` (default)
 
 - New request for the same conversation → **cancels the active request** and drops older queued work for that conversation.
 - Good for interactive chat UIs where the user interrupts the model mid-response.
-- Side effect: if a client accidentally reuses a `user` across unrelated threads, requests will stomp each other.
+- Side effect: if a client accidentally reuses a conversation ID across unrelated threads, requests will interrupt each other.
 
 ### `queue`
 
 - New request for the same conversation → **waits** behind the active request.
-- Requests for a single conversation run strictly FIFO.
+- Admitted requests for a single conversation run strictly FIFO; validation
+  happens before scheduler admission.
 - Good for batch workflows, agent frameworks with strict turn ordering, or when you genuinely want no in-flight cancellation.
 
 Switch policy:
@@ -136,8 +154,10 @@ Behavior:
 There are four model-related controls, and they do different jobs:
 
 - Request body `model`
-  What the caller asks to run. Claude aliases (`sonnet`, `opus`, `fable`, `haiku`) are
-  still the default path.
+  What the caller asks to run. Claude selectors (`sonnet`, `opus`, `best`,
+  `fable`, `haiku`) are still the default path. Supported accounts can request
+  `sonnet[1m]`, `opus[1m]`, or a full Sonnet/Opus ID ending in `[1m]`; the
+  proxy preserves that selector for Claude Code to validate.
 - `CLAUDE_PROXY_MODEL_FALLBACKS`
   Claude-only step-down order when the requested Claude family is unavailable.
 - `GEMINI_CLI_MODEL` / `GEMINI_CLI_EXTRA_MODELS`
@@ -153,7 +173,8 @@ That rule is strict:
 
 - omitted `model` stays on Claude
 - `default` stays on Claude
-- `sonnet`, `opus`, `fable`, `haiku`, and resolved Claude IDs stay on Claude
+- `sonnet`, `opus`, `best`, `fable`, `haiku`, extended-context variants, and
+  resolved Claude IDs stay on Claude
 - external providers are used only when the caller explicitly asks for one of
   their model IDs
 
@@ -222,6 +243,52 @@ Behavior:
   the proxy itself. Set `passthrough` only if you explicitly want raw upstream
   streaming behavior.
 
+### Multiple providers and model capabilities
+
+Use `OPENAI_COMPAT_PROVIDERS_JSON` when one fallback is not enough:
+
+```bash
+export OPENROUTER_API_KEY=...
+export OPENAI_COMPAT_PROVIDERS_JSON='[
+  {
+    "provider": "local",
+    "baseUrl": "http://127.0.0.1:11434/v1",
+    "models": [
+      {
+        "id": "local/qwen3",
+        "upstreamId": "qwen3",
+        "timeoutMs": 420000,
+        "capabilities": {
+          "reasoning": true,
+          "tools": true,
+          "contextWindow": 131072
+        }
+      }
+    ]
+  },
+  {
+    "provider": "openrouter",
+    "baseUrl": "https://openrouter.ai/api/v1",
+    "apiKeyEnv": "OPENROUTER_API_KEY",
+    "models": ["openrouter/google/gemini-3-pro"],
+    "streamMode": "passthrough"
+  }
+]'
+```
+
+Supported model capability fields are `chatCompletions`, `streaming`,
+`reasoning`, `tools`, `vision`, `structuredOutputs`, `contextWindow`, and
+`maxOutputTokens`. The proxy reports these, provider probe state, and per-model
+timeouts through `GET /v1/capabilities`. Model IDs must be unique and cannot
+collide with Claude aliases.
+
+Each `baseUrl` must be an `http` or `https` URL without embedded credentials.
+Put secrets in `apiKeyEnv` (preferred), `apiKey`, or explicit headers instead.
+Configuration fails fast when a named `apiKeyEnv` is unset. External catalog
+probes are capped at 30 seconds and are cancelled when the feature scanner
+stops; an unprobed model remains `configured` rather than being reported as
+available.
+
 ### Z.AI / GLM
 
 If you want the free GLM path, the simplest setup is:
@@ -252,8 +319,9 @@ npm start
 ```
 
 The CLI-based Gemini provider can advertise multiple model IDs at once via
-`GEMINI_CLI_EXTRA_MODELS`. API-key fallbacks still advertise one configured
-model at a time.
+`GEMINI_CLI_EXTRA_MODELS`. Legacy API-key fallback variables advertise one
+model; `OPENAI_COMPAT_PROVIDERS_JSON` can advertise any number of providers and
+models.
 
 ## Admin API
 
@@ -269,8 +337,15 @@ When enabled, these endpoints are mounted:
 - `GET /admin/thinking-budget`
 - `POST /admin/thinking-budget`
 - `PUT /admin/thinking-budget`
+- `POST /admin/features/refresh`
+- `POST /admin/conversations/:conversationId/reset`
 
-This endpoint changes server behavior at runtime, persists its override across restarts, and the proxy does not authenticate clients, so only enable it on trusted networks.
+Without `CLAUDE_PROXY_ADMIN_TOKEN`, these routes accept loopback requests only.
+When a token is configured, every admin request must send either
+`Authorization: Bearer <token>` or `X-Admin-Token: <token>`, including
+localhost requests. The thinking-budget override persists across restarts;
+feature refresh re-probes Claude and external providers; conversation reset
+discards only the resumable provider session and retains the stored transcript.
 
 ## Network binding
 
@@ -284,6 +359,8 @@ Then point clients at `http://127.0.0.1:8080/v1` for localhost use, or your chos
 
 > [!NOTE]
 > The safest default is to keep the server on `127.0.0.1`. If you set `HOST=0.0.0.0`, treat the proxy like an internal service and put network controls in front of it.
+> The Ops snapshots include conversation diagnostics and request IDs used by
+> cancellation controls; they are intended for trusted operators.
 
 > [!NOTE]
 > When you use `docker-compose.yml`, the `.env` `PORT` value controls the host-side published port only. The Node process still listens on `3456` inside the container.
@@ -299,6 +376,7 @@ The proxy resets a per-request stall timer every time the subprocess produces ou
 | Family | Stall timeout |
 | --- | --- |
 | Opus | 120 s |
+| Fable | 120 s |
 | Sonnet | 90 s |
 | Haiku | 45 s |
 
@@ -309,6 +387,7 @@ Absolute wall-clock ceiling per request, regardless of activity.
 | Family | Hard timeout |
 | --- | --- |
 | Opus | 30 min |
+| Fable | 30 min |
 | Sonnet | 10 min |
 | Haiku | 2 min |
 

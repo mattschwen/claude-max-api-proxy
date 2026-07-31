@@ -33,7 +33,12 @@ function renderOpsDashboardPage(): string {
         </div>
 
         <div class="topbar-strip">
-          <div class="status-chip" id="connectionChip">
+          <div
+            class="status-chip"
+            id="connectionChip"
+            role="status"
+            aria-live="polite"
+          >
             <span class="status-dot"></span>
             <strong id="connectionLabel">Link down</strong>
           </div>
@@ -81,6 +86,22 @@ function renderOpsDashboardPage(): string {
           </a>
         </div>
       </header>
+
+      <div
+        class="offline-banner"
+        id="offlineBanner"
+        role="status"
+        aria-live="polite"
+        hidden
+      >
+        <div>
+          <strong>Live telemetry is offline</strong>
+          <span id="offlineMessage">Showing the last snapshot while the link retries.</span>
+        </div>
+        <button class="toolbar-button" id="retryConnectionButton" type="button">
+          Retry now
+        </button>
+      </div>
 
       <section class="panel topology-panel" data-tone="cyan">
         <div class="section-head">
@@ -170,7 +191,11 @@ function renderOpsDashboardPage(): string {
             <strong>Live lanes</strong>
             <span id="laneSummary">0 active</span>
           </div>
-          <div class="lane-list" id="laneList">
+          <div
+            class="lane-list"
+            id="laneList"
+            aria-label="Active and queued conversations"
+          >
             <div class="empty-inline">No active or queued chats</div>
           </div>
         </div>
@@ -186,7 +211,7 @@ function renderOpsDashboardPage(): string {
             <strong class="chart-current" id="flowCurrent">0.00 req/s</strong>
           </div>
           <div class="chart-legend" id="flowLegend"></div>
-          <svg class="chart-svg" id="flowChart" viewBox="0 0 640 180" aria-label="Flow chart"></svg>
+          <svg class="chart-svg" id="flowChart" viewBox="0 0 640 180" role="img" aria-label="Request flow chart awaiting telemetry"></svg>
         </article>
 
         <article class="panel chart-panel" data-tone="pink">
@@ -198,7 +223,7 @@ function renderOpsDashboardPage(): string {
             <strong class="chart-current" id="latencyCurrent">—</strong>
           </div>
           <div class="chart-legend" id="latencyLegend"></div>
-          <svg class="chart-svg" id="latencyChart" viewBox="0 0 640 180" aria-label="Latency chart"></svg>
+          <svg class="chart-svg" id="latencyChart" viewBox="0 0 640 180" role="img" aria-label="Latency chart awaiting telemetry"></svg>
         </article>
 
         <article class="panel chart-panel" data-tone="amber">
@@ -210,7 +235,7 @@ function renderOpsDashboardPage(): string {
             <strong class="chart-current" id="pressureCurrent">0 / 0</strong>
           </div>
           <div class="chart-legend" id="pressureLegend"></div>
-          <svg class="chart-svg" id="pressureChart" viewBox="0 0 640 180" aria-label="Pressure chart"></svg>
+          <svg class="chart-svg" id="pressureChart" viewBox="0 0 640 180" role="img" aria-label="Queue and worker pressure chart awaiting telemetry"></svg>
         </article>
 
         <article class="panel chart-panel" data-tone="violet">
@@ -222,7 +247,7 @@ function renderOpsDashboardPage(): string {
             <strong class="chart-current" id="loadCurrent">0% / 0 MB</strong>
           </div>
           <div class="chart-legend" id="loadLegend"></div>
-          <svg class="chart-svg" id="loadChart" viewBox="0 0 640 180" aria-label="Process chart"></svg>
+          <svg class="chart-svg" id="loadChart" viewBox="0 0 640 180" role="img" aria-label="Process load chart awaiting telemetry"></svg>
         </article>
       </section>
 
@@ -239,7 +264,11 @@ function renderOpsDashboardPage(): string {
           </div>
 
           <div class="conversations-shell">
-            <div class="conversation-list" id="conversationList">
+            <div
+              class="conversation-list"
+              id="conversationList"
+              aria-label="Recent conversations"
+            >
               <div class="empty-inline">No chats</div>
             </div>
 
@@ -252,6 +281,9 @@ function renderOpsDashboardPage(): string {
                 <div class="detail-chip-row">
                   <span class="detail-chip" id="detailRoute">—</span>
                   <span class="detail-chip" id="detailTimer">—</span>
+                  <button class="toolbar-button" id="cancelRequestButton" type="button" hidden>Cancel request</button>
+                  <button class="toolbar-button" id="resetSessionButton" type="button" hidden>Reset session</button>
+                  <button class="toolbar-button" id="openInLabButton" type="button" hidden>Open in Lab</button>
                 </div>
               </div>
 
@@ -273,8 +305,8 @@ function renderOpsDashboardPage(): string {
               <h2>Event stream</h2>
             </div>
             <div class="section-head-meta">
-              <button class="toolbar-button is-active" id="followLogsButton" type="button">Follow</button>
-              <button class="toolbar-button" id="pauseLogsButton" type="button">Pause</button>
+              <button class="toolbar-button is-active" id="followLogsButton" type="button" aria-pressed="true">Follow</button>
+              <button class="toolbar-button" id="pauseLogsButton" type="button" aria-pressed="false">Pause</button>
             </div>
           </div>
 
@@ -292,6 +324,7 @@ function renderOpsDashboardPage(): string {
             <input
               type="search"
               id="logSearch"
+              aria-label="Search event logs"
               placeholder="Search event, reason, model"
               autocomplete="off"
             />

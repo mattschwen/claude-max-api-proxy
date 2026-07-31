@@ -17,6 +17,7 @@ import { log } from "../logger.js";
 import { modelAvailability } from "../model-availability.js";
 import { runtimeConfig } from "../config.js";
 import { getPublicExternalProviderInfos } from "../external-providers.js";
+import { shouldFailStartupForMissingClaudeModels } from "../startup-policy.js";
 
 const DEFAULT_PORT = 3456;
 const SHUTDOWN_GRACE_MS = 30000;
@@ -35,14 +36,12 @@ async function main(): Promise<void> {
   console.log("Checking Claude CLI...");
   const cliCheck = await verifyClaude();
   if (!cliCheck.ok) {
-    if (externalProviders.length === 0) {
+    if (runtimeConfig.requireClaude) {
       console.error(`Error: ${cliCheck.error}`);
       process.exit(1);
     }
     console.warn(`  Warning: ${cliCheck.error}`);
-    console.warn(
-      "  Continuing because an external provider is configured.",
-    );
+    console.warn("  Continuing because Claude is optional in this configuration.");
   } else {
     console.log(`  Claude CLI: ${cliCheck.version || "OK"}`);
   }
@@ -50,14 +49,14 @@ async function main(): Promise<void> {
   console.log("Checking authentication...");
   const authCheck = await verifyAuth();
   if (!authCheck.ok) {
-    if (externalProviders.length === 0) {
+    if (runtimeConfig.requireClaude) {
       console.error(`Error: ${authCheck.error}`);
       console.error("Please run: claude auth login");
       process.exit(1);
     }
     console.warn(`  Warning: ${authCheck.error}`);
     console.warn(
-      "  Claude auth is degraded, but an external provider is available.\n",
+      "  Claude auth is degraded, but Claude is optional in this configuration.\n",
     );
   } else {
     console.log("  Authentication: OK\n");
@@ -105,6 +104,17 @@ async function main(): Promise<void> {
       console.warn(
         `  Fallback probes also failed: ${runtimeConfig.modelFallbacks.join(", ")}`,
       );
+    }
+    if (
+      shouldFailStartupForMissingClaudeModels(
+        runtimeConfig.requireClaude,
+        availability.available.length,
+      )
+    ) {
+      console.error(
+        "  Claude is required by configuration, so startup cannot continue without an accessible Claude model.",
+      );
+      process.exit(1);
     }
     if (externalProviders.length > 0) {
       console.warn(

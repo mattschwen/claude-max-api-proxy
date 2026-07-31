@@ -31,30 +31,76 @@ export interface SessionMapping {
   resumeFailures?: number;
 }
 
-class SessionManager {
+export interface SessionManagerOptions {
+  sessionFile?: string;
+  now?: () => number;
+}
+
+export class SessionManager {
   private sessions = new Map<string, SessionMapping>();
+  /**
+   * Fresh --session-id values are attempt-local until Claude returns a
+   * successful result. They must never be visible as resumable or persisted.
+   */
+  private provisionalSessions = new Map<string, SessionMapping>();
   private loaded = false;
   private dirty = false;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  private loadPromise: Promise<void> | null = null;
+  private writePromise: Promise<void> | null = null;
+  private revision = 0;
+  private savedRevision = 0;
+  private readonly sessionFile: string;
+  private readonly now: () => number;
+
+  constructor(options: SessionManagerOptions = {}) {
+    this.sessionFile = options.sessionFile ?? SESSION_FILE;
+    this.now = options.now ?? Date.now;
+  }
 
   async load(): Promise<void> {
     if (this.loaded) return;
+    if (this.loadPromise) return this.loadPromise;
+
+    this.loadPromise = (async () => {
+      try {
+        const data = await fs.readFile(this.sessionFile, "utf-8");
+        const parsed = JSON.parse(data) as Record<string, SessionMapping>;
+        // Requests may arrive while the async file read is in flight. Preserve
+        // those newer in-memory mappings instead of replacing them on load.
+        this.sessions = new Map([
+          ...Object.entries(parsed),
+          ...this.sessions.entries(),
+        ]);
+        console.log(`[SessionManager] Loaded ${this.sessions.size} sessions`);
+      } catch {
+        // Missing/corrupt state starts empty, while still preserving any
+        // mappings created during the failed read.
+      } finally {
+        this.loaded = true;
+      }
+    })();
+
     try {
-      const data = await fs.readFile(SESSION_FILE, "utf-8");
-      const parsed = JSON.parse(data) as Record<string, SessionMapping>;
-      this.sessions = new Map(Object.entries(parsed));
-      this.loaded = true;
-      console.log(`[SessionManager] Loaded ${this.sessions.size} sessions`);
-    } catch {
-      this.sessions = new Map();
-      this.loaded = true;
+      await this.loadPromise;
+    } finally {
+      this.loadPromise = null;
     }
   }
 
   saveSync(): void {
     try {
+      // Advance the revision so an in-flight async write cannot publish an
+      // older snapshot after this synchronous shutdown flush.
+      this.revision += 1;
+      const targetRevision = this.revision;
       const data = Object.fromEntries(this.sessions);
-      fsSync.writeFileSync(SESSION_FILE, JSON.stringify(data, null, 2));
+      fsSync.mkdirSync(path.dirname(this.sessionFile), { recursive: true });
+      const tempFile =
+        `${this.sessionFile}.${process.pid}.${targetRevision}.sync.tmp`;
+      fsSync.writeFileSync(tempFile, JSON.stringify(data, null, 2));
+      fsSync.renameSync(tempFile, this.sessionFile);
+      this.savedRevision = targetRevision;
       this.dirty = false;
     } catch (err) {
       console.error("[SessionManager] Sync save error:", err);
@@ -62,23 +108,71 @@ class SessionManager {
   }
 
   private scheduleSave(): void {
+    this.revision += 1;
     this.dirty = true;
     if (this.saveTimer) return;
-    this.saveTimer = setTimeout(async () => {
+    this.saveTimer = setTimeout(() => {
       this.saveTimer = null;
       if (!this.dirty) return;
-      try {
-        const data = Object.fromEntries(this.sessions);
-        await fs.writeFile(SESSION_FILE, JSON.stringify(data, null, 2));
-        this.dirty = false;
-      } catch (err) {
+      void this.flush().catch((err) => {
         console.error("[SessionManager] Async save error:", err);
-      }
+      });
     }, 1000);
   }
 
   async save(): Promise<void> {
-    this.scheduleSave();
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
+    await this.flush();
+  }
+
+  private async flush(): Promise<void> {
+    await this.load();
+    if (this.writePromise) {
+      await this.writePromise;
+      if (this.savedRevision < this.revision) {
+        await this.flush();
+      }
+      return;
+    }
+
+    const operation = (async () => {
+      do {
+        const targetRevision = this.revision;
+        const data = JSON.stringify(Object.fromEntries(this.sessions), null, 2);
+        await fs.mkdir(path.dirname(this.sessionFile), { recursive: true });
+        const tempFile =
+          `${this.sessionFile}.${process.pid}.${targetRevision}.tmp`;
+        try {
+          await fs.writeFile(tempFile, data);
+          // A synchronous shutdown flush may have published a newer revision
+          // while this file was being written. Never let this stale snapshot
+          // overwrite it.
+          if (targetRevision < this.revision) {
+            await fs.unlink(tempFile).catch(() => {});
+            continue;
+          }
+          // Keep the revision check and atomic rename in the same event-loop
+          // turn so saveSync() cannot interleave between them.
+          fsSync.renameSync(tempFile, this.sessionFile);
+        } catch (error) {
+          await fs.unlink(tempFile).catch(() => {});
+          throw error;
+        }
+        this.savedRevision = targetRevision;
+      } while (this.savedRevision < this.revision);
+      this.dirty = false;
+    })();
+    this.writePromise = operation;
+    try {
+      await operation;
+    } finally {
+      if (this.writePromise === operation) {
+        this.writePromise = null;
+      }
+    }
   }
 
   /**
@@ -91,7 +185,7 @@ class SessionManager {
   ): { sessionId: string; isResume: boolean } {
     const existing = this.sessions.get(clawdbotId);
     if (existing) {
-      const ageMs = Date.now() - existing.lastUsedAt;
+      const ageMs = this.now() - existing.lastUsedAt;
       const MAX_RESUME_AGE_MS = 6 * 60 * 60 * 1000;
 
       if (ageMs > MAX_RESUME_AGE_MS) {
@@ -99,17 +193,15 @@ class SessionManager {
           `[SessionManager] Session ${clawdbotId} stale (${Math.round(ageMs / 3600000)}h), creating fresh`,
         );
         this.sessions.delete(clawdbotId);
+        this.scheduleSave();
       } else {
-        existing.taskCount = (existing.taskCount || 0) + 1;
-        if (existing.taskCount > MAX_TASKS_PER_SESSION) {
+        if ((existing.taskCount || 0) >= MAX_TASKS_PER_SESSION) {
           console.log(
-            `[SessionManager] Session ${clawdbotId} hit task limit (${existing.taskCount}), resetting`,
+            `[SessionManager] Session ${clawdbotId} hit task limit (${existing.taskCount || 0}), resetting`,
           );
           this.sessions.delete(clawdbotId);
-        } else {
-          existing.lastUsedAt = Date.now();
-          existing.model = model;
           this.scheduleSave();
+        } else {
           return { sessionId: existing.claudeSessionId, isResume: true };
         }
       }
@@ -119,18 +211,17 @@ class SessionManager {
     const mapping: SessionMapping = {
       clawdbotId,
       claudeSessionId,
-      createdAt: Date.now(),
-      lastUsedAt: Date.now(),
+      createdAt: this.now(),
+      lastUsedAt: this.now(),
       model,
       taskCount: 0,
       resumeFailures: 0,
     };
-    this.sessions.set(clawdbotId, mapping);
-    log("session.created", {
+    this.provisionalSessions.set(clawdbotId, mapping);
+    log("session.provisional", {
       conversationId: clawdbotId,
       sessionId: claudeSessionId.slice(0, 8),
     });
-    this.scheduleSave();
     return { sessionId: claudeSessionId, isResume: false };
   }
 
@@ -138,13 +229,65 @@ class SessionManager {
     return this.sessions.get(clawdbotId);
   }
 
+  /**
+   * Promote a successfully completed CLI/fork session to the conversation
+   * head. Callers should never invoke this for cancelled or failed attempts.
+   */
+  commitSession(
+    clawdbotId: string,
+    claudeSessionId: string,
+    model: string,
+  ): void {
+    const existing = this.sessions.get(clawdbotId);
+    const provisional = this.provisionalSessions.get(clawdbotId);
+    const now = this.now();
+    this.provisionalSessions.delete(clawdbotId);
+    this.sessions.set(clawdbotId, {
+      clawdbotId,
+      claudeSessionId,
+      createdAt: existing?.createdAt ?? provisional?.createdAt ?? now,
+      lastUsedAt: now,
+      model,
+      taskCount: (existing?.taskCount ?? 0) + 1,
+      resumeFailures: 0,
+    });
+    this.scheduleSave();
+  }
+
   delete(clawdbotId: string): boolean {
-    const deleted = this.sessions.delete(clawdbotId);
-    if (deleted) {
+    const deletedCommitted = this.sessions.delete(clawdbotId);
+    const deletedProvisional = this.provisionalSessions.delete(clawdbotId);
+    if (deletedCommitted || deletedProvisional) {
       log("session.invalidate", { conversationId: clawdbotId });
+    }
+    if (deletedCommitted) {
       this.scheduleSave();
     }
-    return deleted;
+    return deletedCommitted || deletedProvisional;
+  }
+
+  /**
+   * Discard only a failed fresh attempt, preserving any separately committed
+   * checkpoint that may still be the valid conversation head.
+   */
+  discardProvisional(
+    clawdbotId: string,
+    claudeSessionId?: string,
+  ): boolean {
+    const provisional = this.provisionalSessions.get(clawdbotId);
+    if (
+      !provisional ||
+      (claudeSessionId &&
+        provisional.claudeSessionId !== claudeSessionId)
+    ) {
+      return false;
+    }
+    this.provisionalSessions.delete(clawdbotId);
+    log("session.provisional_discard", {
+      conversationId: clawdbotId,
+      sessionId: provisional.claudeSessionId.slice(0, 8),
+    });
+    return true;
   }
 
   /**
@@ -198,12 +341,17 @@ class SessionManager {
   }
 
   cleanup(): number {
-    const cutoff = Date.now() - SESSION_TTL_MS;
+    const cutoff = this.now() - SESSION_TTL_MS;
     let removed = 0;
     for (const [key, session] of this.sessions) {
       if (session.lastUsedAt < cutoff) {
         this.sessions.delete(key);
         removed++;
+      }
+    }
+    for (const [key, session] of this.provisionalSessions) {
+      if (session.lastUsedAt < cutoff) {
+        this.provisionalSessions.delete(key);
       }
     }
     if (removed > 0) {

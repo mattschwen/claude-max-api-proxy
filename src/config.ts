@@ -1,6 +1,14 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type {
+  ExternalModelCapabilities,
+  ExternalModelDescriptor,
+} from "./external-provider-types.js";
+import {
+  isCollisionProneExternalModelId,
+  stripModelProviderPrefix,
+} from "./models.js";
 
 export type SameConversationPolicy = "latest-wins" | "queue";
 
@@ -17,9 +25,11 @@ export type ExternalFallbackStreamMode = "synthetic" | "passthrough";
 export interface OpenAICompatFallbackConfig {
   provider: string;
   baseUrl: string;
-  apiKey: string;
+  apiKey?: string;
   model: string;
+  models?: ExternalModelDescriptor[];
   streamMode: ExternalFallbackStreamMode;
+  headers?: Record<string, string>;
 }
 
 export interface GeminiCliFallbackConfig {
@@ -112,6 +122,242 @@ function parseExternalFallbackStreamMode(
   return defaultValue;
 }
 
+const DEFAULT_EXTERNAL_MODEL_CAPABILITIES: ExternalModelCapabilities = {
+  chatCompletions: true,
+  streaming: true,
+  reasoning: false,
+  tools: false,
+  vision: false,
+  structuredOutputs: false,
+};
+
+function parsePositiveNumber(value: unknown, defaultValue: number): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : defaultValue;
+}
+
+function assertSafeExternalProviderBaseUrl(
+  baseUrl: string,
+  provider: string,
+): void {
+  let parsedBaseUrl: URL;
+  try {
+    parsedBaseUrl = new URL(baseUrl);
+  } catch {
+    throw new Error(`External provider '${provider}' has an invalid baseUrl`);
+  }
+  if (
+    parsedBaseUrl.protocol !== "http:" &&
+    parsedBaseUrl.protocol !== "https:"
+  ) {
+    throw new Error(
+      `External provider '${provider}' baseUrl must use http or https`,
+    );
+  }
+  if (parsedBaseUrl.username || parsedBaseUrl.password) {
+    throw new Error(
+      `External provider '${provider}' baseUrl must not contain credentials. Use apiKey, apiKeyEnv, or headers instead.`,
+    );
+  }
+}
+
+function parseExternalModelDescriptor(
+  value: unknown,
+  provider: string,
+  defaultTimeoutMs: number,
+): ExternalModelDescriptor | null {
+  const raw = typeof value === "string"
+    ? { id: value }
+    : value && typeof value === "object" && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : null;
+  const id = parseNonEmptyString(
+    raw && typeof raw.id === "string" ? raw.id : undefined,
+  );
+  if (!raw || !id) return null;
+
+  const capabilitiesRaw =
+    raw.capabilities &&
+      typeof raw.capabilities === "object" &&
+      !Array.isArray(raw.capabilities)
+      ? raw.capabilities as Record<string, unknown>
+      : {};
+  const readCapability = (
+    key: keyof ExternalModelCapabilities,
+    fallback: boolean,
+  ): boolean => {
+    const candidate = capabilitiesRaw[key];
+    return typeof candidate === "boolean" ? candidate : fallback;
+  };
+
+  return {
+    id,
+    upstreamId: parseNonEmptyString(
+      typeof raw.upstreamId === "string" ? raw.upstreamId : undefined,
+    ),
+    ownedBy: parseNonEmptyString(
+      typeof raw.ownedBy === "string" ? raw.ownedBy : undefined,
+    ) || provider,
+    timeoutMs: parsePositiveNumber(raw.timeoutMs, defaultTimeoutMs),
+    capabilities: {
+      chatCompletions: readCapability("chatCompletions", true),
+      streaming: readCapability("streaming", true),
+      reasoning: readCapability("reasoning", false),
+      tools: readCapability("tools", false),
+      vision: readCapability("vision", false),
+      structuredOutputs: readCapability("structuredOutputs", false),
+      contextWindow: parsePositiveNumber(
+        capabilitiesRaw.contextWindow,
+        0,
+      ) || undefined,
+      maxOutputTokens: parsePositiveNumber(
+        capabilitiesRaw.maxOutputTokens,
+        0,
+      ) || undefined,
+    },
+  };
+}
+
+function assertSafeExternalModelIds(
+  configs: OpenAICompatFallbackConfig[],
+): void {
+  const seen = new Map<string, string>();
+  for (const config of configs) {
+    const models = config.models?.length
+      ? config.models
+      : [{
+          id: config.model,
+          ownedBy: config.provider,
+          timeoutMs: 180000,
+          capabilities: DEFAULT_EXTERNAL_MODEL_CAPABILITIES,
+        }];
+    for (const model of models) {
+      if (isCollisionProneExternalModelId(model.id)) {
+        throw new Error(
+          `External model '${model.id}' from provider '${config.provider}' collides with a Claude alias or model ID. Use a provider-qualified ID such as '${config.provider}/${model.id}'.`,
+        );
+      }
+      const routingKey = stripModelProviderPrefix(model.id).trim().toLowerCase();
+      const existing = seen.get(routingKey);
+      if (existing) {
+        throw new Error(
+          `External model '${model.id}' is configured by both '${existing}' and '${config.provider}'. Model routing IDs must be unique.`,
+        );
+      }
+      seen.set(routingKey, config.provider);
+    }
+  }
+}
+
+/**
+ * Parse multiple named OpenAI-compatible providers. The JSON form intentionally
+ * replaces (rather than merges with) legacy single-provider env vars so a
+ * leftover GEMINI_API_KEY cannot create an accidental duplicate route.
+ */
+export function parseExternalProviderConfigs(
+  env: NodeJS.ProcessEnv = process.env,
+): OpenAICompatFallbackConfig[] {
+  const rawJson =
+    parseNonEmptyString(env.OPENAI_COMPAT_PROVIDERS_JSON) ||
+    parseNonEmptyString(env.OPENAI_COMPAT_PROVIDERS);
+  if (!rawJson) {
+    const legacy = parseExternalFallbackConfig(env);
+    const configs = legacy ? [legacy] : [];
+    assertSafeExternalModelIds(configs);
+    return configs;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawJson);
+  } catch (error) {
+    throw new Error(
+      `OPENAI_COMPAT_PROVIDERS_JSON must be valid JSON: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+  const entries = Array.isArray(parsed) ? parsed : [parsed];
+  const configs = entries.map((entry, index) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error(`External provider entry ${index + 1} must be an object`);
+    }
+    const raw = entry as Record<string, unknown>;
+    const provider =
+      parseNonEmptyString(
+        typeof raw.provider === "string" ? raw.provider : undefined,
+      ) || `provider-${index + 1}`;
+    const baseUrl = parseNonEmptyString(
+      typeof raw.baseUrl === "string" ? raw.baseUrl : undefined,
+    );
+    if (!baseUrl) {
+      throw new Error(`External provider '${provider}' requires baseUrl`);
+    }
+    assertSafeExternalProviderBaseUrl(baseUrl, provider);
+
+    const timeoutMs = parsePositiveNumber(raw.timeoutMs, 180000);
+    const rawModels = Array.isArray(raw.models)
+      ? raw.models
+      : typeof raw.model === "string"
+        ? [raw.model]
+        : [];
+    const models = rawModels
+      .map((model) =>
+        parseExternalModelDescriptor(model, provider, timeoutMs)
+      )
+      .filter((model): model is ExternalModelDescriptor => model !== null);
+    if (models.length === 0) {
+      throw new Error(
+        `External provider '${provider}' requires at least one model`,
+      );
+    }
+
+    const apiKeyEnv = parseNonEmptyString(
+      typeof raw.apiKeyEnv === "string" ? raw.apiKeyEnv : undefined,
+    );
+    const apiKeyFromEnv = apiKeyEnv
+      ? parseNonEmptyString(env[apiKeyEnv])
+      : undefined;
+    if (apiKeyEnv && !apiKeyFromEnv) {
+      throw new Error(
+        `External provider '${provider}' references unset apiKeyEnv '${apiKeyEnv}'`,
+      );
+    }
+    const apiKey =
+      parseNonEmptyString(
+        typeof raw.apiKey === "string" ? raw.apiKey : undefined,
+      ) ||
+      apiKeyFromEnv;
+    const headers =
+      raw.headers &&
+        typeof raw.headers === "object" &&
+        !Array.isArray(raw.headers)
+        ? Object.fromEntries(
+            Object.entries(raw.headers as Record<string, unknown>)
+              .filter((entry): entry is [string, string] =>
+                typeof entry[1] === "string"
+              ),
+          )
+        : undefined;
+
+    return {
+      provider,
+      baseUrl,
+      apiKey,
+      model: models[0].id,
+      models,
+      streamMode: parseExternalFallbackStreamMode(
+        typeof raw.streamMode === "string" ? raw.streamMode : undefined,
+        "synthetic",
+      ),
+      headers,
+    } satisfies OpenAICompatFallbackConfig;
+  });
+
+  assertSafeExternalModelIds(configs);
+  return configs;
+}
+
 export function parseExternalFallbackConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): OpenAICompatFallbackConfig | null {
@@ -196,6 +442,10 @@ export function parseExternalFallbackConfig(
   if (!baseUrl || !apiKey || !model) {
     return null;
   }
+  assertSafeExternalProviderBaseUrl(
+    baseUrl,
+    provider || "openai-compatible-fallback",
+  );
 
   return {
     provider: provider || "openai-compatible-fallback",
@@ -256,6 +506,7 @@ function defaultMaxConcurrentRequests(): number {
 }
 
 export interface ProxyRuntimeConfig {
+  requireClaude: boolean;
   sameConversationPolicy: SameConversationPolicy;
   debugQueues: boolean;
   enableAdminApi: boolean;
@@ -266,6 +517,7 @@ export interface ProxyRuntimeConfig {
   modelFallbacks: string[];
   geminiCliFallback: GeminiCliFallbackConfig | null;
   externalFallback: OpenAICompatFallbackConfig | null;
+  externalProviders: OpenAICompatFallbackConfig[];
 }
 
 // Where runtime-mutable state (the admin-endpoint thinking budget override)
@@ -311,7 +563,22 @@ export function readRuntimeConfig(
   // Persisted admin overrides win over the env var default so changes made
   // via /admin/thinking-budget survive restarts.
   const envDefault = env.DEFAULT_THINKING_BUDGET?.trim() || undefined;
+  const geminiCliFallback = parseGeminiCliFallbackConfig(env);
+  const externalProviders = parseExternalProviderConfigs(env);
+  const hasExternalProviderJson = Boolean(
+    parseNonEmptyString(env.OPENAI_COMPAT_PROVIDERS_JSON) ||
+      parseNonEmptyString(env.OPENAI_COMPAT_PROVIDERS),
+  );
+  const externalFallback = hasExternalProviderJson
+    ? null
+    : externalProviders[0] ?? null;
+  const hasExternalProvider =
+    geminiCliFallback !== null || externalProviders.length > 0;
   return {
+    requireClaude: parseBoolean(
+      env.CLAUDE_PROXY_REQUIRE_CLAUDE,
+      !hasExternalProvider,
+    ),
     sameConversationPolicy: parseSameConversationPolicy(
       env.CLAUDE_PROXY_SAME_CONVERSATION_POLICY,
     ),
@@ -325,8 +592,9 @@ export function readRuntimeConfig(
       defaultMaxConcurrentRequests(),
     ),
     modelFallbacks: parseCsvList(env.CLAUDE_PROXY_MODEL_FALLBACKS),
-    geminiCliFallback: parseGeminiCliFallbackConfig(env),
-    externalFallback: parseExternalFallbackConfig(env),
+    geminiCliFallback,
+    externalFallback,
+    externalProviders,
   };
 }
 

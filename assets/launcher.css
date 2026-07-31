@@ -113,6 +113,18 @@ textarea {
   font: inherit;
 }
 
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .eyebrow,
 .signal-label,
 .field span:first-child,
@@ -286,7 +298,8 @@ textarea {
   transform: translateY(-1px);
   border-color: rgba(255, 79, 168, 0.36);
   box-shadow: 0 16px 40px rgba(7, 9, 24, 0.34);
-  outline: none;
+  outline: 3px solid color-mix(in oklab, var(--color-accent-cyan) 72%, white 28%);
+  outline-offset: 2px;
 }
 
 .button--primary {
@@ -300,6 +313,13 @@ textarea {
   opacity: 0.6;
   cursor: not-allowed;
   transform: none;
+}
+
+.button--compact {
+  min-height: 44px;
+  padding-inline: 13px;
+  border-radius: 14px;
+  font-size: var(--text-caption);
 }
 
 .signal-grid {
@@ -481,6 +501,115 @@ textarea {
   grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
 }
 
+.lab-thread-toolbar,
+.thread-actions,
+.lab-thread-list {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.lab-thread-toolbar {
+  justify-content: space-between;
+  padding: 12px 0 2px;
+}
+
+.lab-thread-toolbar > div:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.lab-thread-toolbar strong {
+  font-size: var(--text-body-sm);
+}
+
+.thread-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.lab-thread-list {
+  overflow-x: auto;
+  padding: 4px 2px 8px;
+  scroll-snap-type: x proximity;
+}
+
+.thread-tab {
+  position: relative;
+  display: grid;
+  flex: 0 0 min(240px, 72vw);
+  gap: 3px;
+  min-height: 54px;
+  padding: 9px 12px 9px 16px;
+  border: 1px solid rgba(166, 128, 255, 0.18);
+  border-radius: 15px;
+  background: rgba(10, 13, 24, 0.78);
+  color: var(--launch-text);
+  text-align: left;
+  cursor: pointer;
+  scroll-snap-align: start;
+}
+
+.thread-tab::before {
+  content: "";
+  position: absolute;
+  inset: 10px auto 10px 6px;
+  width: 4px;
+  border-radius: 999px;
+  background: rgba(177, 188, 221, 0.55);
+}
+
+.thread-tab[data-state="running"]::before {
+  background: var(--color-accent-cyan);
+}
+
+.thread-tab[data-state="queued"]::before,
+.thread-tab[data-state="interrupting"]::before,
+.thread-tab[data-state="stopping"]::before,
+.thread-tab[data-state="interrupted"]::before,
+.thread-tab[data-state="stopped"]::before {
+  background: var(--color-accent-amber);
+}
+
+.thread-tab[data-state="error"]::before {
+  background: #ff8c7d;
+}
+
+.thread-tab[data-state="success"]::before {
+  background: var(--color-accent-lime);
+}
+
+.thread-tab.is-selected {
+  border-color: rgba(47, 230, 255, 0.38);
+  background:
+    linear-gradient(135deg, rgba(47, 230, 255, 0.08), rgba(154, 107, 255, 0.08)),
+    rgba(10, 13, 24, 0.9);
+}
+
+.thread-tab:focus-visible {
+  outline: 3px solid color-mix(in oklab, var(--color-accent-cyan) 72%, white 28%);
+  outline-offset: 2px;
+}
+
+.thread-tab-title {
+  overflow: hidden;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thread-tab-meta,
+.composer-hint,
+.model-help,
+.resume-label {
+  color: var(--launch-muted);
+  font-size: var(--text-caption);
+}
+
+.thread-tab-meta {
+  text-transform: capitalize;
+}
+
 .section-head {
   margin-bottom: 10px;
 }
@@ -504,6 +633,33 @@ textarea {
     linear-gradient(180deg, rgba(9, 12, 24, 0.98), rgba(14, 11, 30, 0.96));
   color: var(--launch-text);
   padding: 0 14px;
+}
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+.toggle:focus-within {
+  border-color: rgba(47, 230, 255, 0.7);
+  outline: 3px solid rgba(47, 230, 255, 0.28);
+  outline-offset: 2px;
+}
+
+.model-help,
+.composer-hint {
+  margin: 0;
+  padding: 9px 12px;
+  border: 1px solid rgba(166, 128, 255, 0.14);
+  border-radius: 12px;
+  background: rgba(9, 12, 24, 0.7);
+}
+
+.model-help[data-state="error"] {
+  border-color: rgba(255, 140, 125, 0.34);
+  color: #ffc0b8;
+}
+
+.model-help[data-state="warn"] {
+  border-color: rgba(255, 214, 107, 0.28);
 }
 
 input,
@@ -571,6 +727,18 @@ textarea::placeholder {
 
 .message-card[data-role="error"] {
   border-color: rgba(255, 122, 109, 0.28);
+}
+
+.message-card[data-status="queued"],
+.message-card[data-status="interrupted"],
+.message-card[data-status="stopped"],
+.message-card[data-status="stopping"] {
+  border-color: rgba(255, 214, 107, 0.28);
+}
+
+.message-card[data-status="interrupted"],
+.message-card[data-status="stopped"] {
+  opacity: 0.86;
 }
 
 .message-head {
@@ -690,6 +858,25 @@ textarea::placeholder {
   background: #ff8c7d;
 }
 
+.meta-badge[data-state="queued"]::before,
+.meta-badge[data-state="interrupted"]::before,
+.meta-badge[data-state="stopped"]::before,
+.meta-badge[data-state="stopping"]::before {
+  background: var(--color-accent-amber);
+}
+
+.meta-badge[data-state="running"]::before {
+  background: var(--color-accent-cyan);
+}
+
+.meta-badge[data-state="complete"]::before {
+  background: var(--color-accent-lime);
+}
+
+.meta-badge[data-state="error"]::before {
+  background: #ff8c7d;
+}
+
 .inspector-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   margin-top: 10px;
@@ -740,6 +927,38 @@ textarea::placeholder {
   border: 1px solid rgba(166, 128, 255, 0.14);
   border-radius: 16px;
   background: rgba(10, 13, 24, 0.78);
+}
+
+button.stack-item--interactive {
+  width: 100%;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    transform var(--motion-quick),
+    border-color var(--motion-quick),
+    background var(--motion-quick);
+}
+
+.stack-list-item {
+  min-width: 0;
+}
+
+button.stack-item--interactive:hover {
+  transform: translateY(-1px);
+  border-color: rgba(47, 230, 255, 0.32);
+}
+
+button.stack-item--interactive:focus-visible {
+  border-color: rgba(47, 230, 255, 0.7);
+  outline: 3px solid rgba(47, 230, 255, 0.32);
+  outline-offset: 2px;
+}
+
+.resume-label {
+  margin-top: 8px;
+  color: color-mix(in oklab, var(--color-accent-cyan) 72%, white 20%);
+  font-weight: 700;
 }
 
 .stack-item strong,
@@ -846,6 +1065,23 @@ textarea::placeholder {
 
   .composer-actions .button {
     flex: 1 1 auto;
+  }
+
+  .lab-thread-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .thread-actions {
+    justify-content: stretch;
+  }
+
+  .thread-actions .button {
+    flex: 1 1 auto;
+  }
+
+  .thread-tab {
+    flex-basis: min(220px, 82vw);
   }
 }
 
