@@ -43,3 +43,59 @@ test("cliResultToOpenai strips provider prefixes without pinning model versions"
 
   assert.equal(response.model, "claude-opus-4-7");
 });
+
+test("cliResultToOpenai reports the served model, not an auxiliary one", () => {
+  // Claude Code bills auxiliary work to a cheaper model alongside the real
+  // turn, and lists it first in modelUsage. Taking key[0] reported haiku for
+  // every request regardless of the model actually asked for.
+  const result = makeResult();
+  result.modelUsage = {
+    "claude-haiku-4-5-20251001": { inputTokens: 525, outputTokens: 12, costUSD: 0 },
+    "claude-sonnet-5": { inputTokens: 2, outputTokens: 9, costUSD: 0 },
+  };
+
+  const response = cliResultToOpenai(result, "req-aux", "sonnet");
+
+  // The auxiliary entry is both first and larger, so this only passes if the
+  // requested family actually decides the winner.
+  assert.equal(response.model, "claude-sonnet-5");
+});
+
+test("cliResultToOpenai uses the assistant event for a cross-family fallback", () => {
+  // The auxiliary model can produce more output than the real turn, so token
+  // counts cannot reliably identify which model served the response.
+  const result = makeResult();
+  result.modelUsage = {
+    "claude-haiku-4-5-20251001": {
+      inputTokens: 525,
+      outputTokens: 120,
+      costUSD: 0,
+    },
+    "claude-sonnet-4-6": { inputTokens: 40, outputTokens: 9, costUSD: 0 },
+  };
+
+  const response = cliResultToOpenai(
+    result,
+    "req-fallback",
+    "opus",
+    "claude-sonnet-4-6",
+  );
+
+  assert.equal(response.model, "claude-sonnet-4-6");
+});
+
+test("cliResultToOpenai does not guess from usage when no model evidence exists", () => {
+  const result = makeResult();
+  result.modelUsage = {
+    "claude-haiku-4-5-20251001": {
+      inputTokens: 525,
+      outputTokens: 120,
+      costUSD: 0,
+    },
+    "claude-sonnet-4-6": { inputTokens: 40, outputTokens: 9, costUSD: 0 },
+  };
+
+  const response = cliResultToOpenai(result, "req-unknown", "opus");
+
+  assert.equal(response.model, "opus");
+});

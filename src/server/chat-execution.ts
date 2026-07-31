@@ -697,6 +697,7 @@ async function runNonStreamingSubprocess(
     const subprocess = new ClaudeSubprocess();
     const cleanup = new CleanupSet();
     let finalResult: ClaudeCliResult | null = null;
+    let lastAssistantModel: string | undefined;
     let lastAssistantText = "";
     let lastAssistantError: string | undefined;
     let isComplete = false;
@@ -745,6 +746,7 @@ async function runNonStreamingSubprocess(
     });
 
     subprocess.on("assistant", (message: ClaudeCliAssistant) => {
+      lastAssistantModel = message.message.model;
       lastAssistantText = extractTextContent(message);
       lastAssistantError = message.error;
     });
@@ -842,7 +844,14 @@ async function runNonStreamingSubprocess(
         }
 
         if (!res.headersSent) {
-          res.json(cliResultToOpenai(finalResult, requestId, cliInput.model));
+          res.json(
+            cliResultToOpenai(
+              finalResult,
+              requestId,
+              cliInput.model,
+              lastAssistantModel,
+            ),
+          );
         }
       } else if (!res.headersSent) {
         res.status(500).json({

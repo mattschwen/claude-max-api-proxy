@@ -2,7 +2,7 @@
  * Converts Claude CLI output to OpenAI-compatible response format
  * Phase 5c: Token validation and streaming token estimates
  */
-import { normalizeModelName } from "../models.js";
+import { normalizeModelName, resolveModelFamily } from "../models.js";
 import type { ClaudeCliAssistant, ClaudeCliResult } from "../types/claude-cli.js";
 import type { OpenAIChatResponse, OpenAIChatChunk } from "../types/openai.js";
 
@@ -97,14 +97,57 @@ export function validateTokens(
 }
 
 /**
+ * Pick the model that actually served the turn.
+ *
+ * Claude Code bills auxiliary work (quota probes, title generation) to a
+ * cheaper model alongside the real turn, so `modelUsage` routinely carries two
+ * entries and object key order is not meaningful:
+ *
+ *   { "claude-haiku-4-5-...": {in:525,out:12},  <- auxiliary
+ *     "claude-fable-5":       {in:2,  out:9 } } <- the actual turn
+ *
+ * Taking the first key made every response report the auxiliary model. The
+ * assistant event is authoritative when available, including when
+ * `--fallback-model` served a different family. Older or incomplete CLI output
+ * may omit that event, so in that case prefer a usage entry from the requested
+ * family and finally fall back to the requested model name.
+ */
+export function selectPrimaryModel(
+  modelUsage: ClaudeCliResult["modelUsage"] | undefined,
+  requestedModel: string,
+  servedModel?: string,
+): string {
+  if (servedModel?.trim()) return servedModel;
+
+  const entries = Object.entries(modelUsage || {});
+  if (entries.length === 0) return requestedModel;
+  if (entries.length === 1) return entries[0][0];
+
+  const requestedFamily = resolveModelFamily(requestedModel);
+  if (requestedFamily) {
+    const match = entries.find(
+      ([name]) => resolveModelFamily(name) === requestedFamily,
+    );
+    if (match) return match[0];
+  }
+
+  return requestedModel;
+}
+
+/**
  * Convert Claude CLI result to OpenAI non-streaming response
  */
 export function cliResultToOpenai(
   result: ClaudeCliResult,
   requestId: string,
   fallbackModel = "sonnet",
+  servedModel?: string,
 ): OpenAIChatResponse {
-  const modelName = Object.keys(result.modelUsage || {})[0] || fallbackModel;
+  const modelName = selectPrimaryModel(
+    result.modelUsage,
+    fallbackModel,
+    servedModel,
+  );
 
   return {
     id: `chatcmpl-${requestId}`,
