@@ -35,6 +35,7 @@ test("readRuntimeConfig parses booleans", () => {
     enableAdminApi: true,
     defaultThinkingBudget: undefined,
     defaultAgent: undefined,
+    systemPromptFile: undefined,
     maxConcurrentRequests: config.maxConcurrentRequests,
     modelFallbacks: [],
     geminiCliFallback: null,
@@ -54,6 +55,7 @@ test("readRuntimeConfig reads default thinking budget", () => {
     enableAdminApi: false,
     defaultThinkingBudget: "high",
     defaultAgent: undefined,
+    systemPromptFile: undefined,
     maxConcurrentRequests: config.maxConcurrentRequests,
     modelFallbacks: [],
     geminiCliFallback: null,
@@ -76,6 +78,7 @@ test("readRuntimeConfig prefers persisted thinking budget over env", () => {
     enableAdminApi: false,
     defaultThinkingBudget: "low",
     defaultAgent: undefined,
+    systemPromptFile: undefined,
     maxConcurrentRequests: config.maxConcurrentRequests,
     modelFallbacks: [],
     geminiCliFallback: null,
@@ -98,12 +101,24 @@ test("readRuntimeConfig reads default expert agent", () => {
     enableAdminApi: false,
     defaultThinkingBudget: undefined,
     defaultAgent: "expert-coder",
+    systemPromptFile: undefined,
     maxConcurrentRequests: config.maxConcurrentRequests,
     modelFallbacks: [],
     geminiCliFallback: null,
     externalFallback: null,
   });
   assert.ok(config.maxConcurrentRequests >= 1);
+});
+
+test("readRuntimeConfig reads the house system prompt file", () => {
+  const config = readRuntimeConfig(
+    {
+      CLAUDE_PROXY_SYSTEM_PROMPT_FILE: " /etc/claude/house-prompt.md ",
+    },
+    undefined,
+  );
+
+  assert.equal(config.systemPromptFile, "/etc/claude/house-prompt.md");
 });
 
 test("readRuntimeConfig reads max concurrent requests override", () => {

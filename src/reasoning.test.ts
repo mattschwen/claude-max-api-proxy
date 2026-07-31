@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   REASONING_EFFORT_MAP,
+  parseEffortLabel,
   parseEffortOrTokens,
   resolveReasoningConfig,
   thinkingBudgetToEffort,
@@ -11,6 +12,17 @@ test("parseEffortOrTokens accepts effort labels and integers", () => {
   assert.equal(parseEffortOrTokens("medium"), REASONING_EFFORT_MAP.medium);
   assert.equal(parseEffortOrTokens("32000"), 32000);
   assert.equal(parseEffortOrTokens("invalid"), undefined);
+  assert.equal(parseEffortOrTokens("ultracode"), REASONING_EFFORT_MAP.max);
+  assert.equal(parseEffortOrTokens("auto"), REASONING_EFFORT_MAP.xhigh);
+  assert.equal(parseEffortOrTokens("none"), REASONING_EFFORT_MAP.off);
+  assert.equal(parseEffortOrTokens("minimal"), REASONING_EFFORT_MAP.low);
+});
+
+test("parseEffortLabel normalizes client aliases", () => {
+  assert.equal(parseEffortLabel(" ultracode "), "max");
+  assert.equal(parseEffortLabel("AUTO"), "xhigh");
+  assert.equal(parseEffortLabel("none"), "off");
+  assert.equal(parseEffortLabel("minimal"), "low");
 });
 
 test("resolveReasoningConfig keeps fixed-budget reasoning on older models", () => {

@@ -21,7 +21,11 @@ const COMMAND_FORCE_RELEASE_MS = 1000;
 const SPAWN_PREPARE_TIMEOUT_MS = 30000;
 const SPAWN_PREPARE_ARGS = ["--print", "--output-format", "json", "ok"];
 const XHIGH_MIN_VERSION = { major: 2, minor: 1, patch: 112 } as const;
-const ADAPTIVE_REASONING_MIN_VERSION = { major: 2, minor: 1, patch: 111 } as const;
+const ADAPTIVE_REASONING_MIN_VERSION = {
+  major: 2,
+  minor: 1,
+  patch: 111,
+} as const;
 
 const CLEAN_CLAUDE_ENV = (() => {
   const env = { ...process.env };
@@ -32,8 +36,8 @@ const CLEAN_CLAUDE_ENV = (() => {
   return env;
 })();
 
-let cachedClaudeVersion = process.env.CLAUDE_PROXY_CLAUDE_VERSION?.trim()
-  || undefined;
+let cachedClaudeVersion =
+  process.env.CLAUDE_PROXY_CLAUDE_VERSION?.trim() || undefined;
 
 export interface ClaudeCommandResult {
   stdout: string;
@@ -215,6 +219,20 @@ export function classifyClaudeError(
       status: 429,
       type: "rate_limit_error",
       code: "rate_limited",
+      message: normalized,
+      rawType,
+    };
+  }
+
+  if (
+    /thinking.*blocks.*cannot be modified|redacted_thinking.*blocks.*cannot be modified/i.test(
+      normalized,
+    )
+  ) {
+    return {
+      status: 400,
+      type: "invalid_request_error",
+      code: "thinking_block_replay",
       message: normalized,
       rawType,
     };

@@ -1,4 +1,7 @@
-import { supportsAdaptiveReasoningCli, supportsXHighEffort } from "./claude-cli.inspect.js";
+import {
+  supportsAdaptiveReasoningCli,
+  supportsXHighEffort,
+} from "./claude-cli.inspect.js";
 import { supportsAdaptiveReasoningModel } from "./models.js";
 
 export const REASONING_EFFORT_MAP = {
@@ -43,6 +46,16 @@ function parsePositiveNumber(value: unknown): number | undefined {
   return value;
 }
 
+// Aliases for effort labels that are not native CLI levels. The Claude CLI only
+// accepts low/medium/high/xhigh/max, but clients may send other labels
+// (OpenAI-style requests, or richer effort vocabularies) that map onto them.
+const EFFORT_ALIASES: Record<string, EffortOrOff> = {
+  ultracode: "max", // "ultracode" max-reasoning alias → max effort
+  auto: "xhigh", // auto → high-but-not-max default
+  none: "off", // OpenAI-style "none" → off
+  minimal: "low", // some clients use "minimal"
+};
+
 export function parseEffortLabel(raw: unknown): EffortOrOff | undefined {
   if (typeof raw !== "string") return undefined;
   const normalized = raw.trim().toLowerCase();
@@ -50,15 +63,15 @@ export function parseEffortLabel(raw: unknown): EffortOrOff | undefined {
   if (normalized in REASONING_EFFORT_MAP) {
     return normalized as EffortOrOff;
   }
-  return undefined;
+  return EFFORT_ALIASES[normalized];
 }
 
 export function parseEffortOrTokens(raw: string): number | undefined {
   const trimmed = raw.trim();
   if (!trimmed) return undefined;
-  const lower = trimmed.toLowerCase();
-  if (lower in REASONING_EFFORT_MAP) {
-    return REASONING_EFFORT_MAP[lower as EffortOrOff];
+  const effort = parseEffortLabel(trimmed);
+  if (effort) {
+    return REASONING_EFFORT_MAP[effort];
   }
   const parsed = parseInt(trimmed, 10);
   if (Number.isFinite(parsed) && parsed >= 0) return parsed;
@@ -103,7 +116,8 @@ function parseReasoningObject(value: unknown): RawReasoningInput | null {
 
 function parseThinkingObject(value: unknown): RawReasoningInput | null {
   if (!isRecord(value)) return null;
-  const rawType = typeof value.type === "string" ? value.type.toLowerCase() : "";
+  const rawType =
+    typeof value.type === "string" ? value.type.toLowerCase() : "";
   const mode =
     rawType === "adaptive"
       ? "adaptive"
@@ -114,7 +128,9 @@ function parseThinkingObject(value: unknown): RawReasoningInput | null {
           : undefined;
   const effort =
     parseEffortLabel(value.effort) ||
-    parseEffortLabel(isRecord(value.output_config) ? value.output_config.effort : undefined);
+    parseEffortLabel(
+      isRecord(value.output_config) ? value.output_config.effort : undefined,
+    );
   const budgetTokens = parsePositiveNumber(value.budget_tokens);
 
   if (!mode && !effort && budgetTokens === undefined) {
@@ -139,7 +155,10 @@ function parseOutputConfig(value: unknown): RawReasoningInput | null {
   };
 }
 
-function parseBudgetSource(raw: unknown, source: string): RawReasoningInput | null {
+function parseBudgetSource(
+  raw: unknown,
+  source: string,
+): RawReasoningInput | null {
   if (typeof raw !== "string") return null;
   const parsed = parseEffortOrTokens(raw);
   if (parsed === undefined) return null;

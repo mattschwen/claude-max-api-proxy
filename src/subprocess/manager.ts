@@ -24,6 +24,8 @@ import type {
 import type { ClaudeModel } from "../adapter/openai-to-cli.js";
 import { log } from "../logger.js";
 import { resolveModelFamily } from "../models.js";
+import { runtimeConfig } from "../config.js";
+import { readFileSync, statSync } from "fs";
 import {
   prepareClaudeSpawn,
   getCleanClaudeEnv,
@@ -37,6 +39,59 @@ import {
 } from "../reasoning.js";
 
 const KILL_ESCALATION_MS = 5000;
+
+// Optional global ("house") system prompt sourced from a file
+// (CLAUDE_PROXY_SYSTEM_PROMPT_FILE). It is injected into the proxy's
+// <instructions> wrapper in the USER message on every request — deliberately
+// NOT via --system-prompt, which trips Anthropic's third-party-apps classifier
+// (see buildArgs below). Cached by mtime so edits to the file apply on the next
+// request without a restart.
+let housePromptCache:
+  | { path: string; mtimeMs: number; content: string }
+  | null = null;
+let housePromptWarnedPath: string | null = null;
+
+export function getHouseSystemPrompt(
+  filePath = runtimeConfig.systemPromptFile,
+): string {
+  if (!filePath) return "";
+  try {
+    const { mtimeMs } = statSync(filePath);
+    if (
+      housePromptCache &&
+      housePromptCache.path === filePath &&
+      housePromptCache.mtimeMs === mtimeMs
+    ) {
+      return housePromptCache.content;
+    }
+    const content = readFileSync(filePath, "utf8").trim();
+    housePromptCache = { path: filePath, mtimeMs, content };
+    housePromptWarnedPath = null;
+    return content;
+  } catch (err) {
+    if (housePromptWarnedPath !== filePath) {
+      housePromptWarnedPath = filePath;
+      log("system_prompt_file.unreadable", {
+        path: filePath,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return "";
+  }
+}
+
+export function buildClaudePrompt(
+  prompt: string,
+  requestSystemPrompt?: string,
+  houseSystemPrompt = getHouseSystemPrompt(),
+): string {
+  const combinedSystem = [houseSystemPrompt, requestSystemPrompt]
+    .filter((part) => part && part.trim())
+    .join("\n\n");
+  return combinedSystem
+    ? `<instructions>\n${combinedSystem}\n</instructions>\n\n${prompt}`
+    : prompt;
+}
 
 export interface ActiveSubprocessSnapshot {
   pid: number;
@@ -109,7 +164,9 @@ class SubprocessRegistry {
   getActiveSnapshots(now = Date.now()): ActiveSubprocessSnapshot[] {
     return Array.from(this.active.values())
       .map((subprocess) => subprocess.getActiveSnapshot(now))
-      .filter((snapshot): snapshot is ActiveSubprocessSnapshot => snapshot !== null)
+      .filter(
+        (snapshot): snapshot is ActiveSubprocessSnapshot => snapshot !== null,
+      )
       .sort((left, right) => right.uptimeMs - left.uptimeMs);
   }
 
@@ -170,10 +227,11 @@ export class ClaudeSubprocess extends EventEmitter {
         this.process.stdin?.end();
 
         const pid = this.process.pid;
-        const effort = options.thinkingEffort ||
+        const effort =
+          options.thinkingEffort ||
           (options.thinkingBudget
-          ? thinkingBudgetToEffort(options.thinkingBudget)
-          : undefined);
+            ? thinkingBudgetToEffort(options.thinkingBudget)
+            : undefined);
         this.startedAt = Date.now();
         this.model = options.model;
         this.reasoningMode = options.reasoningMode ?? "off";
@@ -200,10 +258,7 @@ export class ClaudeSubprocess extends EventEmitter {
         this.process.stderr?.on("data", (chunk: Buffer) => {
           const errorText = chunk.toString().trim();
           if (errorText && process.env.DEBUG) {
-            console.error(
-              "[Subprocess stderr]:",
-              errorText.slice(0, 200),
-            );
+            console.error("[Subprocess stderr]:", errorText.slice(0, 200));
           }
         });
 
@@ -261,19 +316,26 @@ export class ClaudeSubprocess extends EventEmitter {
     // system prompt inside the user message, wrapped in <instructions> tags. The
     // first-party sentinel is what the classifier keys on, so the request sails
     // through while the model still follows the embedded instructions.
-    let finalPrompt = prompt;
-    if (options.systemPrompt) {
-      finalPrompt = `<instructions>\n${options.systemPrompt}\n</instructions>\n\n${prompt}`;
-    }
+    // Merge the optional global house prompt (CLAUDE_PROXY_SYSTEM_PROMPT_FILE)
+    // ahead of any per-request client system prompt, then wrap both in the
+    // <instructions> block embedded in the user message.
+    const finalPrompt = buildClaudePrompt(prompt, options.systemPrompt);
 
-    if (options.model === "opus") {
+    // Don't add a fallback model when extended thinking is active. A mid-turn
+    // fallback (opus -> sonnet) produces a thinking block with a different
+    // signature; resuming the next turn against that mismatched block triggers
+    // Anthropic's "thinking blocks ... cannot be modified" 400. Keeping the
+    // model stable preserves thinking-block continuity across resumes.
+    const hasThinking = !!(options.thinkingEffort || options.thinkingBudget);
+    if (options.model === "opus" && !hasThinking) {
       args.push("--fallback-model", "sonnet");
     }
 
     // Map thinking budget (token count) to Claude CLI's --effort levels.
     // The CLI no longer supports a raw token budget; only level-based effort.
     // Mapping matches the inverse of REASONING_EFFORT_MAP in routes.ts.
-    const level = options.thinkingEffort ||
+    const level =
+      options.thinkingEffort ||
       (options.thinkingBudget
         ? thinkingBudgetToEffort(options.thinkingBudget)
         : undefined);
