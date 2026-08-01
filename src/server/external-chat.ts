@@ -84,7 +84,9 @@ class CleanupSet {
       try {
         fn();
       } catch (error) {
-        console.error("[External Chat Cleanup] Error:", error);
+        logError("request.error", error, {
+          reason: "external_cleanup_failed",
+        });
       }
     }
     this.fns.clear();

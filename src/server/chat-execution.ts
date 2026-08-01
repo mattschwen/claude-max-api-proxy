@@ -31,6 +31,45 @@ const SSE_KEEPALIVE_INTERVAL = 5000;
 
 let stallDetections = 0;
 
+/**
+ * Write to an SSE response without racing on client disconnect. The
+ * `writableEnded` check and the actual `write()` are not atomic — a socket
+ * close between them throws ERR_STREAM_WRITE_AFTER_END / EPIPE. Swallow
+ * those; surface anything else.
+ */
+export function safeWrite(res: Response, data: string): boolean {
+  if (res.writableEnded || res.destroyed) return false;
+  try {
+    return res.write(data);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (
+      code === "ERR_STREAM_WRITE_AFTER_END" ||
+      code === "ERR_STREAM_DESTROYED" ||
+      code === "EPIPE"
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+export function safeEnd(res: Response): void {
+  if (res.writableEnded) return;
+  try {
+    res.end();
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (
+      code !== "ERR_STREAM_WRITE_AFTER_END" &&
+      code !== "ERR_STREAM_DESTROYED" &&
+      code !== "EPIPE"
+    ) {
+      throw error;
+    }
+  }
+}
+
 function hasActiveReasoning(cliInput: CliInput): boolean {
   return Boolean(
     cliInput.thinkingBudget ||
@@ -51,7 +90,7 @@ function discardFreshSession(cliInput: CliInput): void {
 /**
  * Safe cleanup collection. Each function runs at most once, wrapped in try/catch.
  */
-class CleanupSet {
+export class CleanupSet {
   private fns = new Set<() => void>();
   private ran = false;
 
@@ -68,7 +107,7 @@ class CleanupSet {
       try {
         fn();
       } catch (error) {
-        console.error("[Cleanup] Error:", error);
+        logError("request.error", error, { reason: "cleanup_failed" });
       }
     }
     this.fns.clear();
@@ -127,12 +166,13 @@ function startStreamingResponse(res: Response, requestId: string): void {
   res.setHeader("X-Request-Id", requestId);
   res.setHeader("X-Accel-Buffering", "no");
   res.flushHeaders();
-  res.write(":ok\n\n");
+  safeWrite(res, ":ok\n\n");
 }
 
 function writeStreamingError(res: Response, error: ClaudeProxyError): void {
   if (res.writableEnded) return;
-  res.write(
+  safeWrite(
+    res,
     `data: ${JSON.stringify({
       error: {
         message: error.message,
@@ -141,8 +181,8 @@ function writeStreamingError(res: Response, error: ClaudeProxyError): void {
       },
     })}\n\n`,
   );
-  res.write("data: [DONE]\n\n");
-  res.end();
+  safeWrite(res, "data: [DONE]\n\n");
+  safeEnd(res);
 }
 
 export function respondWithError(
@@ -242,6 +282,7 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
   }>((resolve) => {
     const subprocess = new ClaudeSubprocess();
     const cleanup = new CleanupSet();
+    cleanup.add(() => subprocess.kill());
 
     let isFirst = true;
     let lastModel = cliInput.model;
@@ -305,8 +346,8 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
     };
 
     const keepaliveId = setInterval(() => {
-      if (!isComplete && !clientDisconnected && !res.writableEnded) {
-        res.write(":keepalive\n\n");
+      if (!isComplete && !clientDisconnected) {
+        safeWrite(res, ":keepalive\n\n");
       }
     }, SSE_KEEPALIVE_INTERVAL);
     cleanup.add(() => clearInterval(keepaliveId));
@@ -330,8 +371,9 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
           reason: "hard_timeout",
           model: lastModel,
         });
-        if (!clientDisconnected && !res.writableEnded) {
-          res.write(
+        if (!clientDisconnected) {
+          safeWrite(
+            res,
             `data: ${JSON.stringify({
               error: {
                 message: `Request timed out after ${hardTimeout / 1000}s`,
@@ -340,8 +382,8 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
               },
             })}\n\n`,
           );
-          res.write("data: [DONE]\n\n");
-          res.end();
+          safeWrite(res, "data: [DONE]\n\n");
+          safeEnd(res);
         }
         void subprocess.stop().finally(() => finish(false));
       }
@@ -364,8 +406,9 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
             stallTimeoutMs: stallTimeout,
             model: cliInput.model,
           });
-          if (!clientDisconnected && !res.writableEnded) {
-            res.write(
+          if (!clientDisconnected) {
+            safeWrite(
+              res,
               `data: ${JSON.stringify({
                 error: {
                   message: `Subprocess stalled (no activity for ${Math.round(stalledFor / 1000)}s)`,
@@ -374,8 +417,8 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
                 },
               })}\n\n`,
             );
-            res.write("data: [DONE]\n\n");
-            res.end();
+            safeWrite(res, "data: [DONE]\n\n");
+            safeEnd(res);
           }
           onStall();
           finishStoredTurn(requestId, "failed", {
@@ -386,7 +429,7 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
           void subprocess.stop().finally(() => finish(false));
         }
       },
-      Math.min(stallTimeout / 2, 10000),
+      Math.max(5000, Math.min(stallTimeout / 2, 10000)),
     );
     cleanup.add(() => clearInterval(stallCheckInterval));
 
@@ -459,8 +502,9 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
             firstTokenMs: tokenDelta,
           });
         }
-        res.write(buildChunk(text, lastModel, isFirst));
-        isFirst = false;
+        if (safeWrite(res, buildChunk(text, lastModel, isFirst))) {
+          isFirst = false;
+        }
       }
     });
 
@@ -615,14 +659,14 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
       }
       finishAfterExit(true);
 
-      if (!clientDisconnected && !res.writableEnded) {
+      if (!clientDisconnected) {
         const doneChunk = createDoneChunk(requestId, lastModel);
         if (usageData) {
           doneChunk.usage = usageData;
         }
-        res.write(`data: ${JSON.stringify(doneChunk)}\n\n`);
-        res.write("data: [DONE]\n\n");
-        res.end();
+        safeWrite(res, `data: ${JSON.stringify(doneChunk)}\n\n`);
+        safeWrite(res, "data: [DONE]\n\n");
+        safeEnd(res);
       }
 
       log("request.complete", {
@@ -661,14 +705,15 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
         model: lastModel,
       });
       finishAfterExit(false);
-      if (!clientDisconnected && !res.writableEnded) {
-        res.write(
+      if (!clientDisconnected) {
+        safeWrite(
+          res,
           `data: ${JSON.stringify({
             error: { message: error.message, type: "server_error", code: null },
           })}\n\n`,
         );
-        res.write("data: [DONE]\n\n");
-        res.end();
+        safeWrite(res, "data: [DONE]\n\n");
+        safeEnd(res);
       }
     });
 
@@ -677,8 +722,9 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
         isComplete = true;
         cleanup.runAll();
         discardFreshSession(cliInput);
-        if (!clientDisconnected && !res.writableEnded) {
-          res.write(
+        if (!clientDisconnected) {
+          safeWrite(
+            res,
             `data: ${JSON.stringify({
               error: {
                 message: `Claude CLI exited with code ${code} without a result`,
@@ -687,8 +733,8 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
               },
             })}\n\n`,
           );
-          res.write("data: [DONE]\n\n");
-          res.end();
+          safeWrite(res, "data: [DONE]\n\n");
+          safeEnd(res);
         }
         finishStoredTurn(requestId, "failed", {
           output: fullResponse || undefined,
@@ -711,6 +757,10 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
           thinkingEffort: cliInput.thinkingEffort,
           reasoningMode: cliInput.reasoningMode,
         })
+        // .catch() is chained synchronously on start()'s promise, so a sync
+        // throw or immediate rejection can never escape as an unhandled
+        // rejection. finish() runs cleanup, which kills the subprocess if it
+        // spawned before the failure, so it can't be orphaned.
         .catch((error: Error) => {
           if (isComplete) return;
           logError("request.error", error, {
@@ -724,8 +774,9 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
             model: lastModel,
           });
           finishAfterExit(false);
-          if (!clientDisconnected && !res.writableEnded) {
-            res.write(
+          if (!clientDisconnected) {
+            safeWrite(
+              res,
               `data: ${JSON.stringify({
                 error: {
                   message: error.message,
@@ -734,8 +785,8 @@ function runStreamingSubprocess(opts: StreamOpts): Promise<{
                 },
               })}\n\n`,
             );
-            res.write("data: [DONE]\n\n");
-            res.end();
+            safeWrite(res, "data: [DONE]\n\n");
+            safeEnd(res);
           }
         });
     }
@@ -854,6 +905,7 @@ async function runNonStreamingSubprocess(
     };
     const subprocess = new ClaudeSubprocess();
     const cleanup = new CleanupSet();
+    cleanup.add(() => subprocess.kill());
     let finalResult: ClaudeCliResult | null = null;
     let lastAssistantModel: string | undefined;
     let lastAssistantText = "";
@@ -1106,6 +1158,10 @@ async function runNonStreamingSubprocess(
           if (isComplete) return;
           isComplete = true;
           cleanup.runAll();
+          logError("request.error", error, {
+            requestId,
+            reason: "subprocess_start_failed",
+          });
           if (!res.headersSent) {
             res.status(500).json({
               error: {

@@ -40,6 +40,7 @@ import {
 
 const KILL_ESCALATION_MS = 5000;
 const KILL_FORCE_RELEASE_MS = 1000;
+const MAX_BUFFER_BYTES = 1024 * 1024;
 
 // Optional global ("house") system prompt sourced from a file
 // (CLAUDE_PROXY_SYSTEM_PROMPT_FILE). It is injected into the proxy's
@@ -236,8 +237,25 @@ export class ClaudeSubprocess extends EventEmitter {
         // Pipe the prompt through stdin. Passing large prompts as argv
         // (OpenClaw system prompts + history) hits the kernel's ARG_MAX
         // limit and spawn() fails with E2BIG.
-        this.process.stdin?.write(finalPrompt);
-        this.process.stdin?.end();
+        const stdin = this.process.stdin;
+        if (stdin) {
+          stdin.on("error", (err: NodeJS.ErrnoException) => {
+            // EPIPE happens when claude exits before consuming the prompt;
+            // surfacing it as a process error would mask the real exit reason.
+            if (err.code !== "EPIPE") {
+              log("subprocess.kill", {
+                pid: this.process?.pid,
+                reason: `stdin error: ${err.message}`,
+              });
+            }
+          });
+          const ok = stdin.write(finalPrompt);
+          if (!ok) {
+            stdin.once("drain", () => stdin.end());
+          } else {
+            stdin.end();
+          }
+        }
 
         const pid = this.process.pid;
         const effort =
@@ -265,6 +283,22 @@ export class ClaudeSubprocess extends EventEmitter {
 
         this.process.stdout?.on("data", (chunk: Buffer) => {
           this.buffer += chunk.toString();
+          if (this.buffer.length > MAX_BUFFER_BYTES) {
+            log("subprocess.kill", {
+              pid: this.process?.pid,
+              reason: "buffer_overflow",
+              bufferBytes: this.buffer.length,
+            });
+            this.buffer = "";
+            this.emit(
+              "error",
+              new Error(
+                `Subprocess output exceeded ${MAX_BUFFER_BYTES} bytes without producing parseable JSON`,
+              ),
+            );
+            this.kill();
+            return;
+          }
           this.processBuffer();
         });
 
@@ -401,8 +435,10 @@ export class ClaudeSubprocess extends EventEmitter {
     log("subprocess.kill", { pid, signal: "SIGTERM" });
     this.process.kill("SIGTERM");
 
-    // Escalate to SIGKILL if process doesn't exit within grace period
+    // Escalate to SIGKILL if process doesn't exit within grace period.
+    // unref() so the timer never keeps the event loop alive on its own.
     this.escalationTimer = setTimeout(() => {
+      this.escalationTimer = null;
       if (this.process && this.process.exitCode === null) {
         log("subprocess.kill", {
           pid,
@@ -412,6 +448,9 @@ export class ClaudeSubprocess extends EventEmitter {
         this.process.kill("SIGKILL");
       }
     }, KILL_ESCALATION_MS);
+    if (typeof this.escalationTimer.unref === "function") {
+      this.escalationTimer.unref();
+    }
 
     // Clear escalation timer if process exits normally
     this.process.once("close", () => {

@@ -89,6 +89,10 @@ export class SessionManager {
   }
 
   saveSync(): void {
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
     try {
       // Advance the revision so an in-flight async write cannot publish an
       // older snapshot after this synchronous shutdown flush.
